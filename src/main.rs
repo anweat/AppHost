@@ -19,6 +19,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Inspect or explicitly configure the shared runtime PATH; never runs a service.
+    Environment {
+        #[command(subcommand)]
+        command: EnvironmentCommand,
+    },
     /// Discover projects without changing them. Review JSON before importing.
     Scan {
         path: PathBuf,
@@ -98,6 +103,16 @@ enum Command {
     },
 }
 
+#[derive(Subcommand)]
+enum EnvironmentCommand {
+    /// Show the saved PATH or the system default without creating files.
+    Show,
+    /// Save an absolute PATH list for future runtime launches.
+    SetPath { path: String },
+    /// Resolve a manifest's commands using the shared runtime environment, without executing them.
+    Check { path: PathBuf },
+}
+
 fn data_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(path) = explicit.or_else(|| env::var_os("APPHOST_DATA_DIR").map(PathBuf::from)) {
         if path.as_os_str().is_empty() {
@@ -130,6 +145,29 @@ fn data_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
 fn run(cli: Cli) -> Result<Option<Value>> {
     // Read-only project commands don't need an available home or writable registry.
     let result = match cli.command {
+        Command::Environment { command } => {
+            let directory = data_dir(cli.data_dir)?;
+            match command {
+                EnvironmentCommand::Show => Ok(json!(apphost::environment::load(&directory)?)),
+                EnvironmentCommand::SetPath { path } => {
+                    Ok(json!(apphost::environment::save_path(&directory, path)?))
+                }
+                EnvironmentCommand::Check { path } => {
+                    let manifest = apphost::validate(&path)?;
+                    let root = if path.is_dir() {
+                        path.as_path()
+                    } else {
+                        path.parent()
+                            .filter(|p| !p.as_os_str().is_empty())
+                            .unwrap_or(std::path::Path::new("."))
+                    };
+                    let baseline = apphost::environment::load(&directory)?;
+                    Ok(
+                        json!({"services": apphost::environment::prepare(&manifest, root, &baseline)?}),
+                    )
+                }
+            }
+        }
         Command::Scan {
             path,
             max_depth,
