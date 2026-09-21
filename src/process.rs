@@ -1,5 +1,5 @@
 //! Platform process-group primitives. Trust checks and runtime persistence belong to L1.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Identity {
     pub pid: u32,
     pub group: u32,

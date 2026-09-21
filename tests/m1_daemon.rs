@@ -201,7 +201,7 @@ fn malformed_versions_params_and_large_frames_never_dispatch() {
     assert_eq!(response["request_id"], "test");
     assert_eq!(response["error"]["code"], "PROTOCOL_VERSION_UNSUPPORTED");
     request["version"] = 1.into();
-    request["method"] = "start".into();
+    request["method"] = "unavailable-method".into();
     assert_eq!(send(&request)["error"]["code"], "METHOD_NOT_FOUND");
     request["method"] = "hello".into();
     request["params"] = json!({"unexpected":true});

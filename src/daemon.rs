@@ -56,3 +56,54 @@ fn unavailable() -> Error {
         "Daemon is unavailable; no process was started automatically",
     )
 }
+
+/// Explicit runtime commands may start the management process; read-only calls
+/// always return an offline result/error without creating a daemon.
+pub fn call(data_dir: &Path, method: &str, params: Value, autostart: bool) -> Result<Value> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::call(data_dir, method, params, autostart)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (data_dir, method, params, autostart);
+        Err(unsupported())
+    }
+}
+pub fn status(data_dir: &Path, installation_id: Option<Uuid>) -> Result<Value> {
+    match call(
+        data_dir,
+        "status",
+        serde_json::json!({"installation_id":installation_id}),
+        false,
+    ) {
+        #[cfg(target_os = "macos")]
+        Err(e) if e.code == "DAEMON_UNAVAILABLE" => {
+            crate::runtime::lifecycle::history(data_dir, installation_id)
+        }
+        result => result,
+    }
+}
+
+/// Registration writes need runtime coordination only when a daemon is live or
+/// a durable instance exists. M0-only offline work remains a short L0 operation.
+pub fn coordinate(data: &Path, id: Uuid, method: &str, params: Value) -> Result<Option<Value>> {
+    #[cfg(target_os = "macos")]
+    {
+        match ping(data) {
+            Ok(_) => return call(data, method, params, false).map(Some),
+            Err(e) if e.code == "DAEMON_UNAVAILABLE" => {}
+            Err(e) => return Err(e),
+        }
+        if data
+            .join("runtime")
+            .join(format!("{id}.json"))
+            .try_exists()
+            .map_err(|e| crate::storage::io_error(data, e))?
+        {
+            return call(data, method, params, true).map(Some);
+        }
+    }
+    let _ = (data, id, method, params);
+    Ok(None)
+}

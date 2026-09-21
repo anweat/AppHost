@@ -172,7 +172,10 @@ pub fn publish(path: &Path, bytes: &[u8], replace: bool) -> Result<()> {
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|e| io_error(parent, e))?;
+    let mut temp = tempfile::Builder::new()
+        .prefix(".apphost-publish-")
+        .tempfile_in(parent)
+        .map_err(|e| io_error(parent, e))?;
     temp.write_all(bytes).map_err(|e| io_error(path, e))?;
     temp.as_file().sync_all().map_err(|e| io_error(path, e))?;
     let result = if replace {
@@ -190,5 +193,10 @@ pub fn publish(path: &Path, bytes: &[u8], replace: bool) -> Result<()> {
             io_error(path, e.error)
         }
     })?;
+    #[cfg(unix)]
+    // Persist the rename before a caller treats a launch intent as durable.
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|e| io_error(parent, e))?;
     Ok(())
 }

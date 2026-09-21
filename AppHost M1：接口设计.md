@@ -75,7 +75,7 @@ Registry v1 的 installation 带 `revision: u64`，从 1 起步；历史记录�
 
 `LaunchPlan::with_current(self, data_dir, action)` 是运行层同步 spawn 的接入点：核对 data-dir，持登记短锁重读当前安装、清单、确认、格式版本和该安装 revision；重新检查 cwd 与可执行路径解析结果。安装已改变返回 STALE_LAUNCH，声明未经确认返回 REVIEW_REQUIRED，解除登记返回 DETACHED；均不调用 action。通过后 action 接收准备好的服务命令，锁保持到同步派发返回；无论成功或失败都会释放。action 不得等待就绪、日志或客户端 IO。只固定声明和当次环境，不签名脚本、可执行文件或依赖内容；文件系统路径核验与进程执行之间仍不是原子事务。
 
-运行层仍负责安装队列、活动实例、端口预检、先持久化启动意图、部分 spawn 失败清理与后续就绪。这个接入点不另建运行状态，不把预检通过视作 App 已运行。
+运行层仍负责安装队列、活动实例、端口预检、先持久化启动意图、部分 spawn 失败的资源清理、已启动服务保留与后续就绪。这个接入点不另建运行状态，不把预检通过视作 App 已运行。
 
 `environment check <路径>` 继续只检查声明与环境；`environment check --installation <UUID>` 使用上述登记信任链路，二者互斥。结果表示准备通过，不表示运行、就绪或免除启动前复核。
 
@@ -141,6 +141,34 @@ data-dir 先规范化，复用私有目录规则。`daemon.lock` 使用独占 OS
 
 `hello` 参数为空对象，返回 protocol_version、daemon_id（每次进程启动重新生成）、pid、data_dir 和 capabilities。客户端先完成同版本握手再发送其他 RPC。`check-launch` 仅接受 installation_id，返回与 LaunchPlan::summary 相同的预检结果，不执行服务、不持有可供客户端复用的启动授权。只有 capabilities 声明的已实现方法可以调用；未知方法返回 METHOD_NOT_FOUND。运行操作、事件订阅和历史状态查询按下述契约接入，不能用空状态响应冒充已完成对账。
 
+### 生命周期与持久化
+
+显式 `start / stop / restart / stop-all` 在 daemon 不在线时，可以用当前 AppHost 可执行文件拉起 `daemon serve`，在 5 秒内完成同版本握手；启动错误提示用前台 serve 查看原因，不另选 data-dir 或端点。`status` 不拉起 daemon：在线返回 `live: true`，离线只读取历史并明确返回 `live: false`。`logs` 只读且不拉起 daemon。运行方法必须出现在 hello.capabilities 中。
+
+`start / stop / restart` 的回执包含 installation_id、instance_id、operation_id、operation_done 和当前 state。回执表示请求已经接受；调用方通过 `status` 等待同一 operation_id 的 operation_done，读取 operation_error 或 operation_result。客户端断连不取消已接受的操作。重复 start 合并同一 STARTING / RUNNING 实例，不重新执行声明；新实例仍须使用 LaunchPlan 完成当前确认核验。FAILED 且仍有服务、采集器或不确定身份时，start 返回 RESTART_REQUIRED。
+
+运行快照保存在 `<data>/runtime/<installation_id>.json`，schema_version 为 1。记录安装、实例和操作身份、五态状态、各服务的安全日志键、声明端口与有效超时、spawn 意图、进程组身份、存活/就绪观察及退出证据；采集器身份单独记录。未取到退出码时明确记录 exit_status_unavailable。Runtime State 仅由 daemon 写入，采集器不参与。原子发布需要同步文件和父目录，启动意图及 spawn_attempted 必须先于相应系统 spawn；拿到 OS 身份后再发布身份检查点。发布中断留下的专用前缀临时文件不参与对账，取得单例锁后只清理可识别的未发布普通文件；损坏的已发布快照明确报错。
+
+每个安装最多一个工作线程，最多同时管理 32 个活动实例、每实例 32 个服务、1024 个安装快照。不同安装独立等待就绪及停止，RPC 不等待这些长操作；相同安装的 Stop 与同步 spawn 派发在短临界区内排序。先停止再重启的后半段重新准备当前声明并预检端口，不复用旧命令。同步 spawn 返回错误后停止派发尚未启动的服务，关闭未使用管道；已经启动的服务保留为失败实例的诊断对象。
+
+就绪检查仅连接声明的 loopback 端口，并通过 macOS libproc 的监听 socket 信息及当前进程身份，证明监听者属于该服务进程组。其他进程抢先监听不能满足就绪。无端口服务连续存活 2 秒后只表示进程就绪；声明的启动期限耗尽返回 READINESS_TIMEOUT。运行中已就绪端口连续 3 次、约 100 ms 间隔检查不可用后，记录 PORT_NOT_READY；失败后不因端口恢复而自动恢复 RUNNING。端口预检冲突返回 PORT_IN_USE，包含可取得的占用 PID/名称；所有者枚举最多 16 项、250 ms，不能查全时明确标记 incomplete，该结果不授予停止外部进程的权限。
+
+停止各服务先发一次 SIGTERM，等待各自声明期限，再发一次 SIGKILL 并有界核验。只有进程组清空后才回收 Child；新启动但瞬时退出的组长可由 `capture_spawned(&Child)` 在尚未回收时记录身份，不能借此认领未知后代。采集器在服务停止后有 2 秒处理 EOF，仍未完成时显式结束并标记日志不完整。停止期间采集错误不能取消 STOPPING。所有已知组清空且没有未解决的 spawn 身份缺口时，才进入 STOPPED；停止失败不执行重启或后续登记变更。
+
+恢复时先拿单例锁，核验全部已有身份，再接受新启动。系统启动时间已改变的旧组视为已消失；同次启动中非空组必须有匹配的已知活成员。磁盘上的 RUNNING 不能直接恢复为 RUNNING，需要重新验证就绪；仍未就绪的进程进入有期限检查。缺失身份的 spawn 意图、身份不一致或不能完成的核验保留为 FAILED + management_uncertain，不认领、不发信号、不重复启动。已接受的停止、完整重启及停止后的登记变更，其意图随运行快照保存；恢复后仍先停止旧组，成功后才执行后半段。
+
+Stop All 先持久化 automatic_wake_paused，再取消尚未派发的启动和重启后半段，向各安装独立提交停止；返回逐安装操作回执或错误，最终结果从对应快照读取。显式 start 只授权本次运行，不解除自动唤醒暂停。
+
+活动或有运行历史的安装，CLI 的 detach / relink 经 daemon 协调；离线时先拉起并对账。协调请求成功停止后才调用 L0 登记写入，长操作的登记结果位于 operation_result。无 daemon、无运行记录的 M0 登记操作仍使用原 L0 入口和回执。批量 detach 在提交任何停止前核验所有安装 ID，并去重，未知 ID 不产生部分停止或登记写入。relink 的 RPC 路径必须是绝对路径，由 CLI 在发送前规范化；停止旧实例不依赖当前源码或清单仍可读取。
+
+### 实例日志读取与普通归档
+
+每实例的独立采集器继承父进程分配的有限描述符列表，一次读取全部服务的 stdout/stderr；不提供由管理 RPC 注入描述符或任意日志路径的入口。服务名只显示，文件使用 s0、s1 等安全键。日志位于 `<data>/instances/<instance_id>/logs`，每段 1 MiB、最多 8 段，包含原始数据和观察索引。采集器正常 EOF 写完成标记；服务主动关闭输出流而继续运行不算采集故障。
+
+`logs` 窗口输入为 installation_id、instance_id、from_ms、to_ms、limit；时间为观察时间的闭区间，limit 为原始字节预算，1–131072，默认 65536。响应包含安全键与服务名映射、原始字节块及窗口缺口标记、实例 log_incomplete。JSON 字节数组会膨胀，仍受统一 1 MiB 响应上限。日志读取在独立 RPC 中进行，不占用生命周期工作线程；后续跟随读取不能阻塞停止。
+
+新实例替换已完成实例前，保存旧实例的只读 record.json，历史日志仍按 installation_id / instance_id 校验归属读取。启动和完整重启时清理过期或超量的普通归档：安装预算为 100 MiB，给当前实例预留 9 MiB，旧归档按创建时间淘汰并应用 7 天年龄上限；不删除活动或管理权不确定的实例。扫描上限 4096 个实例目录、15000 个归档条目；异常目录、链接或超限明确失败，不猜测归属。普通日志归档不承载 D9 的独立失败现场。
+
 运行状态仅 STOPPED / STARTING / RUNNING / STOPPING / FAILED；就绪、退出原因和 management_uncertain 为附加信息。操作 ID 用来关联长请求，不另建持久化任务状态机。
 
 请求采用 JSON Lines：`{version, request_id, method, params}`；响应回显 request_id，成功返回 result，错误返回沿用 M0 的 `{error:{code,message,details}}`。长操作返回 operation_id 后通过状态查询/事件获得结果；断连不取消已接受的操作。事件游标与快照绑定，过期游标要求重新读取快照。
@@ -151,7 +179,7 @@ data-dir 先规范化，复用私有目录规则。`daemon.lock` 使用独占 OS
 | stop | installation_id | 可取消 STARTING；退出已证明归属的全部进程后才报告 STOPPED |
 | restart | installation_id | 先停止旧实例，成功后重新校验并分配新 instance_id |
 | status | installation_id 可选 | 返回当前状态、活动服务与提示；daemon 离线不将历史视为实时 |
-| logs | installation_id、instance_id、service、stream、cursor、limit | 有界读取；跟随模式输出 JSON Lines，慢读不阻塞 stop |
+| logs | installation_id、instance_id、from_ms、to_ms、limit | 有界观察窗口；返回服务映射和缺口标记，慢读不阻塞 stop |
 | url | installation_id | 只读解析稳定入口，不拉起 daemon 或 App |
 | failure | installation_id、failure_id 可选 | 返回结构化失败、证据和现场完整性 |
 | stop-all | 无 | 暂停自动唤醒、取消待启动、停止所有活动服务，返回逐项结果 |

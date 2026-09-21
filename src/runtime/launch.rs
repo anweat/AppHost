@@ -68,6 +68,10 @@ impl LaunchPlan {
         })
     }
 
+    pub fn manifest(&self) -> &crate::Manifest {
+        self.snapshot.manifest()
+    }
+
     pub fn summary(&self) -> LaunchSummary<'_> {
         LaunchSummary {
             installation_id: self.snapshot.installation().installation_id,

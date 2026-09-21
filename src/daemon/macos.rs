@@ -34,7 +34,7 @@ fn rpc_error(error: io::Error) -> Error {
     ) {
         Error::new("RPC_TIMEOUT", "Daemon RPC exceeded its deadline")
     } else {
-        unavailable()
+        unavailable().details(json!({"os_code":error.raw_os_error()}))
     }
 }
 
@@ -70,7 +70,7 @@ fn verify_peer(stream: &UnixStream) -> Result<()> {
 }
 
 // std's blocking connect has no deadline. Use a nonblocking socket for the
-// handshake, then restore blocking IO with absolute read/write deadlines below.
+// handshake. IO stays nonblocking, with absolute poll deadlines below.
 fn connect(path: &Path) -> Result<UnixStream> {
     let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
     if raw < 0 {
@@ -138,23 +138,51 @@ fn connect(path: &Path) -> Result<UnixStream> {
         }
     }
     let stream = UnixStream::from(fd);
-    stream.set_nonblocking(false).map_err(rpc_error)?;
+    stream.set_nonblocking(true).map_err(rpc_error)?;
     verify_peer(&stream)?;
     Ok(stream)
 }
 
+fn wait_io(stream: &UnixStream, events: libc::c_short, deadline: Instant) -> Result<()> {
+    loop {
+        let timeout = remaining(deadline)?.as_millis().max(1) as i32;
+        let mut poll = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events,
+            revents: 0,
+        };
+        let count = unsafe { libc::poll(&mut poll, 1, timeout) };
+        if count > 0 {
+            return Ok(());
+        }
+        if count == 0 {
+            continue;
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(rpc_error(error));
+        }
+    }
+}
+
 fn read_frame(stream: &mut UnixStream, maximum: usize) -> Result<Vec<u8>> {
+    // Use poll deadlines instead of timeval socket options. In particular this
+    // avoids SO_RCVTIMEO/SO_SNDTIMEO EINVAL observed on macOS under launch load,
+    // without retries of an accepted operation or refreshing a slow peer's clock.
+    stream.set_nonblocking(true).map_err(rpc_error)?;
     let deadline = Instant::now() + DEADLINE;
     let mut bytes = Vec::new();
     let mut buffer = [0; 4096];
     loop {
-        stream
-            .set_read_timeout(Some(remaining(deadline)?))
-            .map_err(rpc_error)?;
+        remaining(deadline)?;
         let limit = buffer.len().min(maximum + 1 - bytes.len());
         let count = match stream.read(&mut buffer[..limit]) {
             Ok(count) => count,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                wait_io(stream, libc::POLLIN, deadline)?;
+                continue;
+            }
             Err(error) => return Err(rpc_error(error)),
         };
         if count == 0 {
@@ -164,7 +192,7 @@ fn read_frame(stream: &mut UnixStream, maximum: usize) -> Result<Vec<u8>> {
                 Error::new("PROTOCOL_ERROR", "Incomplete daemon frame")
             });
         }
-        if let Some(end) = buffer[..count].iter().position(|byte| *byte == b'\n') {
+        if let Some(end) = buffer[..count].iter().position(|b| *b == b'\n') {
             bytes.extend_from_slice(&buffer[..end]);
             return Ok(bytes);
         }
@@ -177,18 +205,19 @@ fn read_frame(stream: &mut UnixStream, maximum: usize) -> Result<Vec<u8>> {
         }
     }
 }
-
 fn write_frame(stream: &mut UnixStream, bytes: &[u8]) -> Result<()> {
+    stream.set_nonblocking(true).map_err(rpc_error)?;
     let deadline = Instant::now() + DEADLINE;
-    let mut remaining_bytes = bytes;
-    while !remaining_bytes.is_empty() {
-        stream
-            .set_write_timeout(Some(remaining(deadline)?))
-            .map_err(rpc_error)?;
-        match stream.write(remaining_bytes) {
+    let mut pending = bytes;
+    while !pending.is_empty() {
+        remaining(deadline)?;
+        match stream.write(pending) {
             Ok(0) => return Err(unavailable()),
-            Ok(count) => remaining_bytes = &remaining_bytes[count..],
+            Ok(count) => pending = &pending[count..],
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                wait_io(stream, libc::POLLOUT, deadline)?
+            }
             Err(error) => return Err(rpc_error(error)),
         }
     }
@@ -284,14 +313,25 @@ fn bind(data_dir: &Path) -> Result<Endpoint> {
     Ok(endpoint)
 }
 
-fn handle(mut stream: UnixStream, data_dir: &Path, hello: &Value) -> Result<()> {
+fn handle(
+    mut stream: UnixStream,
+    data_dir: &Path,
+    hello: &Value,
+    manager: &Arc<crate::runtime::lifecycle::Manager>,
+) -> Result<()> {
     verify_peer(&stream)?;
     let request =
         read_frame(&mut stream, protocol::MAX_REQUEST).and_then(|bytes| protocol::decode(&bytes));
     let (id, result) = match &request {
         Ok(request) => (
             Some(request.request_id.as_str()),
-            protocol::dispatch(data_dir, request, hello),
+            if request.version != protocol::VERSION
+                || matches!(request.method.as_str(), "hello" | "check-launch")
+            {
+                protocol::dispatch(data_dir, request, hello)
+            } else {
+                manager.dispatch(request)
+            },
         ),
         Err(_) => (None, Err(request.err().unwrap())),
     };
@@ -313,9 +353,10 @@ pub(super) fn serve(data_dir: &Path) -> Result<()> {
     storage::private_directory(data_dir)?;
     let data_dir = Arc::new(storage::directory(data_dir)?);
     let endpoint = bind(&data_dir)?;
+    let manager = crate::runtime::lifecycle::Manager::open(&data_dir)?;
     let hello = Arc::new(
         json!({"protocol_version":protocol::VERSION,"daemon_id":Uuid::new_v4(),
-        "pid":std::process::id(),"data_dir":*data_dir,"capabilities":["hello","check-launch"]}),
+        "pid":std::process::id(),"data_dir":*data_dir,"capabilities":["hello","check-launch","start","stop","restart","status","stop-all","logs","detach","relink"]}),
     );
     let clients = Arc::new(AtomicUsize::new(0));
     for stream in endpoint.listener.incoming() {
@@ -331,13 +372,14 @@ pub(super) fn serve(data_dir: &Path) -> Result<()> {
         let slot = Slot(Arc::clone(&clients));
         let data_dir = Arc::clone(&data_dir);
         let hello = Arc::clone(&hello);
+        let manager = Arc::clone(&manager);
         // Failed worker creation drops both stream and slot. No unbounded queue,
         // persistent idle worker pool, or client-owned cancellation state.
         let _ = thread::Builder::new()
             .name("apphost-rpc".into())
             .spawn(move || {
                 let _slot = slot;
-                let _ = handle(stream, &data_dir, &hello);
+                let _ = handle(stream, &data_dir, &hello, &manager);
             });
     }
     Ok(())
@@ -421,6 +463,62 @@ pub(super) fn check_launch(data_dir: &Path, installation_id: Uuid) -> Result<Val
         "check-launch",
         json!({"installation_id":installation_id}),
     )
+}
+
+pub(super) fn call(data_dir: &Path, method: &str, params: Value, autostart: bool) -> Result<Value> {
+    if autostart {
+        storage::private_directory(data_dir)?;
+        if let Err(error) = ping(data_dir) {
+            if error.code != "DAEMON_UNAVAILABLE" {
+                return Err(error);
+            }
+            use std::os::unix::process::CommandExt;
+            let mut child = std::process::Command::new(
+                std::env::current_exe().map_err(|e| storage::io_error(data_dir, e))?,
+            )
+            .arg("--data-dir")
+            .arg(data_dir)
+            .args(["daemon", "serve"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0)
+            .spawn()
+            .map_err(|e| storage::io_error(data_dir, e))?;
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if ping(data_dir).is_ok() {
+                    break;
+                }
+                if child
+                    .try_wait()
+                    .map_err(|e| storage::io_error(data_dir, e))?
+                    .is_some()
+                    || Instant::now() >= deadline
+                {
+                    return Err(Error::new(
+                        "DAEMON_UNAVAILABLE",
+                        "Daemon did not become ready; run daemon serve to inspect its startup error",
+                    ));
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+    let data_dir = client_root(data_dir)?;
+    let hello = handshake(&data_dir)?;
+    if !hello["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m == method)
+    {
+        return Err(Error::new(
+            "METHOD_NOT_FOUND",
+            "Daemon does not advertise this method",
+        ));
+    }
+    rpc(&data_dir, method, params)
 }
 
 #[cfg(test)]

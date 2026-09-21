@@ -17,6 +17,10 @@ fn uncertain(message: &str) -> Error {
 }
 
 fn identity(pid: u32) -> Result<Option<Identity>> {
+    identity_inner(pid, false)
+}
+
+fn identity_inner(pid: u32, include_zombie: bool) -> Result<Option<Identity>> {
     if pid == 0 || pid > i32::MAX as u32 {
         return Err(uncertain("Invalid process ID"));
     }
@@ -42,7 +46,7 @@ fn identity(pid: u32) -> Result<Option<Identity>> {
     if count != size || info.pbi_pid != pid {
         return Err(uncertain("Incomplete process identity"));
     }
-    if info.pbi_status == libc::SZOMB {
+    if info.pbi_status == libc::SZOMB && !include_zombie {
         return Ok(None);
     }
     Ok(Some(Identity {
@@ -121,7 +125,8 @@ pub fn observe_exit(child: &Child) -> Result<Option<ExitStatus>> {
     Ok(Some(ExitStatus::from_raw(raw)))
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Group {
     group: u32,
     boot: (i64, i64),
@@ -141,6 +146,23 @@ impl Group {
             return Err(uncertain(
                 "Child is not the leader of an owned independent group",
             ));
+        }
+        Ok(Self {
+            group: leader.group,
+            boot: boot_time()?,
+            known: vec![leader],
+            exhausted: false,
+        })
+    }
+
+    /// A freshly spawned, unreaped leader pins its process-group ID even when
+    /// exec exits immediately. Capture its OS identity before classifying exit.
+    pub fn capture_spawned(child: &Child) -> Result<Self> {
+        let _ = observe_exit(child)?; // ECHILD rejects an already-reaped handle.
+        let leader = identity_inner(child.id(), true)?
+            .ok_or_else(|| uncertain("Spawned leader disappeared"))?;
+        if leader.group != child.id() || leader.uid != unsafe { libc::geteuid() } {
+            return Err(uncertain("Invalid spawned group"));
         }
         Ok(Self {
             group: leader.group,
@@ -288,6 +310,104 @@ fn members(group: u32) -> Result<Vec<Identity>> {
         }
         return Ok(result);
     }
+}
+
+impl Group {
+    /// Boot changes prove the old processes gone. On the same boot, a saved
+    /// identity must still anchor a nonempty group before it can be managed.
+    pub fn reconcile(&mut self) -> Result<Vec<Identity>> {
+        if self.group <= 1
+            || self.group > i32::MAX as u32
+            || self.group == unsafe { libc::getpgrp() } as u32
+            || self.known.len() > 65536
+            || self
+                .known
+                .iter()
+                .any(|p| p.group != self.group || p.uid != unsafe { libc::geteuid() })
+        {
+            return Err(uncertain("Invalid saved process group"));
+        }
+        if boot_time()? != self.boot {
+            self.known.clear();
+            self.exhausted = true;
+            return Ok(Vec::new());
+        }
+        self.refresh()
+    }
+
+    pub fn port_ready(&mut self, port: u16) -> Result<bool> {
+        use std::net::{SocketAddr, TcpStream};
+        unsafe extern "C" {
+            fn apphost_pid_listens(pid: i32, port: u16, family: i32) -> i32;
+        }
+        let members = self.refresh()?;
+        for (host, family) in [("127.0.0.1", libc::AF_INET), ("::1", libc::AF_INET6)] {
+            let address: SocketAddr = format!(
+                "{}:{port}",
+                if family == libc::AF_INET6 {
+                    "[::1]"
+                } else {
+                    host
+                }
+            )
+            .parse()
+            .unwrap();
+            // Connect only to the declared loopback port; never search for an entry.
+            if TcpStream::connect_timeout(&address, Duration::from_millis(30)).is_err() {
+                continue;
+            }
+            for member in &members {
+                let found = unsafe { apphost_pid_listens(member.pid as i32, port, family) };
+                if found < 0 {
+                    return Err(uncertain("Cannot inspect listening socket owner"));
+                }
+                if found == 1 && identity(member.pid)?.as_ref() == Some(member) {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+}
+
+/// Best-effort evidence for a failed bind, never authority to signal. Inspection
+/// is capped both by PID count and elapsed time; omitted owners stay explicit.
+pub fn port_owners(port: u16) -> serde_json::Value {
+    unsafe extern "C" {
+        fn apphost_pid_listens(pid: i32, port: u16, family: i32) -> i32;
+    }
+    let mut pids = vec![0i32; 65536];
+    let count = unsafe {
+        libc::proc_listallpids(
+            pids.as_mut_ptr().cast(),
+            (pids.len() * mem::size_of::<i32>()) as i32,
+        )
+    };
+    if count <= 0 || count as usize >= pids.len() {
+        return serde_json::json!({"owners":[],"incomplete":true});
+    }
+    let mut owners = Vec::new();
+    let mut incomplete = false;
+    let end = Instant::now() + Duration::from_millis(250);
+    for pid in pids.into_iter().take(count as usize) {
+        if Instant::now() >= end || owners.len() >= 16 {
+            incomplete = true;
+            break;
+        }
+        if pid <= 0 {
+            continue;
+        }
+        let result = [libc::AF_INET, libc::AF_INET6]
+            .map(|family| unsafe { apphost_pid_listens(pid, port, family) });
+        if result.contains(&1) {
+            let mut name = [0u8; 256];
+            let n = unsafe { libc::proc_name(pid, name.as_mut_ptr().cast(), name.len() as u32) };
+            owners.push(serde_json::json!({"pid":pid,"name":if n>0 {Some(String::from_utf8_lossy(&name[..(n as usize).min(name.len())]).trim_end_matches('\0').to_string())}else{None}}));
+        } else if result.contains(&-1) {
+            incomplete = true;
+        }
+    }
+    serde_json::json!({"owners":owners,"incomplete":incomplete})
 }
 
 #[cfg(test)]

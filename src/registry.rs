@@ -769,6 +769,25 @@ pub fn retention(data_dir: &Path, id: Uuid, policy: RetentionPolicy) -> Result<I
     update(data_dir, id, |i| i.retention_policy = policy)
 }
 
+/// Read-only batch preflight for the runtime coordinator. Registration records
+/// remain addressable after detach, so no long-lived registry lock is needed.
+pub fn check_installation_ids(data_dir: &Path, ids: &[Uuid]) -> Result<()> {
+    let registry = load(data_dir)?;
+    for id in ids {
+        if !registry
+            .installations
+            .iter()
+            .any(|record| record.installation_id == *id)
+        {
+            return Err(Error::new(
+                "NOT_FOUND",
+                "Unknown installation_id; no registrations changed",
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn detach_many(data_dir: &Path, ids: &[Uuid]) -> Result<Vec<Installation>> {
     if ids.is_empty() {
         return Ok(vec![]);

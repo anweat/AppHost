@@ -19,6 +19,29 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(hide = true)]
+    InternalCollect { root: PathBuf, descriptors: String },
+    /// Start a confirmed installation (starts the daemon if needed).
+    Start { installation_id: Uuid },
+    /// Stop all verified process groups belonging to an installation.
+    Stop { installation_id: Uuid },
+    /// Stop the old instance before preparing and starting a new one.
+    Restart { installation_id: Uuid },
+    /// Read live state, or explicitly marked history while offline.
+    Status { installation_id: Option<Uuid> },
+    /// Pause automatic wake and stop all managed instances.
+    StopAll,
+    /// Read a bounded observation window from the current instance.
+    Logs {
+        installation_id: Uuid,
+        instance_id: Uuid,
+        #[arg(long, default_value_t = 0)]
+        from_ms: u128,
+        #[arg(long,default_value_t=u64::MAX as u128)]
+        to_ms: u128,
+        #[arg(long, default_value_t = 65536)]
+        limit: usize,
+    },
     /// Run or contact the local daemon explicitly.
     Daemon {
         #[command(subcommand)]
@@ -176,6 +199,57 @@ fn data_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
 fn run(cli: Cli) -> Result<Option<Value>> {
     // Read-only project commands don't need an available home or writable registry.
     let result = match cli.command {
+        Command::InternalCollect { root, descriptors } => {
+            #[cfg(target_os = "macos")]
+            {
+                apphost::runtime::collector::run(&root, &descriptors)?;
+                return Ok(None);
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = (root, descriptors);
+                return Err(Error::new(
+                    "UNSUPPORTED_PLATFORM",
+                    "Collector requires macOS",
+                ));
+            }
+        }
+        Command::Start { installation_id } => apphost::daemon::call(
+            &data_dir(cli.data_dir)?,
+            "start",
+            json!({"installation_id":installation_id}),
+            true,
+        ),
+        Command::Stop { installation_id } => apphost::daemon::call(
+            &data_dir(cli.data_dir)?,
+            "stop",
+            json!({"installation_id":installation_id}),
+            true,
+        ),
+        Command::Restart { installation_id } => apphost::daemon::call(
+            &data_dir(cli.data_dir)?,
+            "restart",
+            json!({"installation_id":installation_id}),
+            true,
+        ),
+        Command::Status { installation_id } => {
+            apphost::daemon::status(&data_dir(cli.data_dir)?, installation_id)
+        }
+        Command::StopAll => {
+            apphost::daemon::call(&data_dir(cli.data_dir)?, "stop-all", json!({}), true)
+        }
+        Command::Logs {
+            installation_id,
+            instance_id,
+            from_ms,
+            to_ms,
+            limit,
+        } => apphost::daemon::call(
+            &data_dir(cli.data_dir)?,
+            "logs",
+            json!({"installation_id":installation_id,"instance_id":instance_id,"from_ms":from_ms,"to_ms":to_ms,"limit":limit}),
+            false,
+        ),
         Command::Daemon { command } => {
             let directory = data_dir(cli.data_dir)?;
             match command {
@@ -318,11 +392,20 @@ fn run(cli: Cli) -> Result<Option<Value>> {
         Command::Relink {
             installation_id,
             path,
-        } => Ok(json!(apphost::relink(
-            &data_dir(cli.data_dir)?,
-            installation_id,
-            &path
-        )?)),
+        } => {
+            let data = data_dir(cli.data_dir)?;
+            let path = std::fs::canonicalize(&path)
+                .map_err(|e| Error::new("SOURCE_MISSING", e.to_string()))?;
+            match apphost::daemon::coordinate(
+                &data,
+                installation_id,
+                "relink",
+                json!({"installation_id":installation_id,"path":path}),
+            )? {
+                Some(value) => Ok(value),
+                None => Ok(json!(apphost::relink(&data, installation_id, &path)?)),
+            }
+        }
         Command::Retention {
             installation_id,
             policy,
@@ -337,7 +420,33 @@ fn run(cli: Cli) -> Result<Option<Value>> {
         )?)),
         Command::List { all } => Ok(json!(apphost::list(&data_dir(cli.data_dir)?, all)?)),
         Command::Detach { installation_ids } => {
-            let installations = apphost::detach_many(&data_dir(cli.data_dir)?, &installation_ids)?;
+            let data = data_dir(cli.data_dir)?;
+            let coordinated = installation_ids
+                .iter()
+                .any(|id| data.join("runtime").join(format!("{id}.json")).exists())
+                || apphost::daemon::ping(&data).is_ok();
+            if coordinated {
+                apphost::registry::check_installation_ids(&data, &installation_ids)?;
+                let mut results = Vec::new();
+                let mut seen = std::collections::HashSet::new();
+                for id in installation_ids {
+                    if !seen.insert(id) {
+                        continue;
+                    }
+                    results.push(apphost::daemon::call(
+                        &data,
+                        "detach",
+                        json!({"installation_id":id}),
+                        true,
+                    )?);
+                }
+                return Ok(Some(if results.len() == 1 {
+                    results.pop().unwrap()
+                } else {
+                    json!(results)
+                }));
+            }
+            let installations = apphost::detach_many(&data, &installation_ids)?;
             let receipts: Vec<_> = installations
                 .iter()
                 .map(|i| {

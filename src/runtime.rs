@@ -4,7 +4,7 @@ use serde::Serialize;
 mod launch;
 pub use launch::{LaunchPlan, LaunchSummary};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum State {
     Stopped,
@@ -14,7 +14,8 @@ pub enum State {
     Failed,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InstanceStatus {
     state: State,
     pub log_incomplete: bool,
@@ -73,3 +74,11 @@ impl InstanceStatus {
         self.state == State::Stopped
     }
 }
+
+#[cfg(target_os = "macos")]
+pub mod collector;
+#[cfg(target_os = "macos")]
+pub mod lifecycle;
+
+#[cfg(target_os = "macos")]
+mod retention;
