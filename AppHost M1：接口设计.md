@@ -129,6 +129,18 @@ macOS 进程身份使用 PID、微秒级启动时间、有效 UID、进程组和
 
 ## 运行接口约束
 
+### daemon 单例与传输
+
+macOS 入口为 `apphost daemon serve`，以前台进程承载 daemon，便于 CLI 拉起和 LaunchAgent 复用同一个可执行文件。`daemon ping` 仅握手，`daemon check-launch <installation_id>` 仅经 socket 预检已登记安装；两者均不自动拉起 daemon。离线返回 DAEMON_UNAVAILABLE，不创建数据目录或把历史记录当作实时状态。
+
+data-dir 先规范化，复用私有目录规则。`daemon.lock` 使用独占 OS 文件锁，锁持有期覆盖 listener 生命周期；`daemon.sock` 权限为 600。只有拿到锁后才能处理旧 socket，活动 listener、非 socket 文件和符号链接均不覆盖。macOS socket 完整路径必须少于 104 字节，超限报 SOCKET_PATH_TOO_LONG 并提示选择较短的数据目录，不另设隐藏端点。服务端和客户端均通过 getpeereid 校验对端有效 UID 与当前用户相同；握手回传规范化 data-dir，客户端再次核对。
+
+协议版本为 1。请求 request_id 为非空、最多 128 字节的可见 ASCII 字符串，method 最多 64 字节，params 必须为对象；拒绝未知信封字段。短 RPC 每连接一条请求和一条响应，然后关闭；后续订阅使用单独连接。请求正文最多 64 KiB、响应正文最多 1 MiB，以换行结束；不完整帧、无效 UTF-8/JSON、大小超限明确失败。响应携带 version 和 request_id，以及 result 或 error 二者之一；无法识别请求时 request_id 为 null。版本不兼容返回 PROTOCOL_VERSION_UNSUPPORTED，不静默降级。
+
+同时最多接纳 16 个 RPC，超额连接立即关闭；客户端收到 DAEMON_UNAVAILABLE，可显式重试。单次请求读取和响应写入各有 2 秒绝对期限，缓慢逐字节发送不能刷新期限。阻塞的文件预检在有限工作线程中执行，不占用接受连接的主循环；无请求时主循环阻塞等待，不轮询。
+
+`hello` 参数为空对象，返回 protocol_version、daemon_id（每次进程启动重新生成）、pid、data_dir 和 capabilities。客户端先完成同版本握手再发送其他 RPC。`check-launch` 仅接受 installation_id，返回与 LaunchPlan::summary 相同的预检结果，不执行服务、不持有可供客户端复用的启动授权。只有 capabilities 声明的已实现方法可以调用；未知方法返回 METHOD_NOT_FOUND。运行操作、事件订阅和历史状态查询按下述契约接入，不能用空状态响应冒充已完成对账。
+
 运行状态仅 STOPPED / STARTING / RUNNING / STOPPING / FAILED；就绪、退出原因和 management_uncertain 为附加信息。操作 ID 用来关联长请求，不另建持久化任务状态机。
 
 请求采用 JSON Lines：`{version, request_id, method, params}`；响应回显 request_id，成功返回 result，错误返回沿用 M0 的 `{error:{code,message,details}}`。长操作返回 operation_id 后通过状态查询/事件获得结果；断连不取消已接受的操作。事件游标与快照绑定，过期游标要求重新读取快照。

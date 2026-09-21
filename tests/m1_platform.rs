@@ -9,6 +9,20 @@ fn runtime_stubs_fail_explicitly_and_never_spawn() {
     );
     let temp = tempfile::tempdir().unwrap();
     assert_eq!(
+        apphost::daemon::serve(temp.path()).unwrap_err().code,
+        "UNSUPPORTED_PLATFORM"
+    );
+    assert_eq!(
+        apphost::daemon::ping(temp.path()).unwrap_err().code,
+        "UNSUPPORTED_PLATFORM"
+    );
+    assert_eq!(
+        apphost::daemon::check_launch(temp.path(), uuid::Uuid::new_v4())
+            .unwrap_err()
+            .code,
+        "UNSUPPORTED_PLATFORM"
+    );
+    assert_eq!(
         environment::load(temp.path()).unwrap_err().code,
         "UNSUPPORTED_PLATFORM"
     );

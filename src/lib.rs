@@ -1,3 +1,4 @@
+pub mod daemon;
 pub mod discovery;
 pub mod environment;
 mod git_metadata;

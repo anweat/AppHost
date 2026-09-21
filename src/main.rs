@@ -19,6 +19,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run or contact the local daemon explicitly.
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommand,
+    },
     /// Inspect or explicitly configure the shared runtime PATH; never runs a service.
     Environment {
         #[command(subcommand)]
@@ -104,6 +109,16 @@ enum Command {
 }
 
 #[derive(Subcommand)]
+enum DaemonCommand {
+    /// Serve local RPCs in the foreground. Does not start any App.
+    Serve,
+    /// Read-only handshake; never starts a daemon.
+    Ping,
+    /// Check a confirmed installation via the daemon, without executing it.
+    CheckLaunch { installation_id: Uuid },
+}
+
+#[derive(Subcommand)]
 enum EnvironmentCommand {
     /// Explicitly run an interactive login shell to capture PATH. This executes shell startup scripts.
     Capture {
@@ -161,6 +176,19 @@ fn data_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
 fn run(cli: Cli) -> Result<Option<Value>> {
     // Read-only project commands don't need an available home or writable registry.
     let result = match cli.command {
+        Command::Daemon { command } => {
+            let directory = data_dir(cli.data_dir)?;
+            match command {
+                DaemonCommand::Serve => {
+                    apphost::daemon::serve(&directory)?;
+                    return Ok(None);
+                }
+                DaemonCommand::Ping => apphost::daemon::ping(&directory),
+                DaemonCommand::CheckLaunch { installation_id } => {
+                    apphost::daemon::check_launch(&directory, installation_id)
+                }
+            }
+        }
         Command::Environment { command } => {
             let directory = data_dir(cli.data_dir)?;
             match command {

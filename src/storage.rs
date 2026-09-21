@@ -28,6 +28,12 @@ pub(crate) fn private_directory(path: &Path) -> Result<()> {
         builder.mode(0o700);
     }
     builder.create(path).map_err(|e| io_error(path, e))?;
+    check_private_directory(path)
+}
+
+pub(crate) fn check_private_directory(path: &Path) -> Result<()> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
