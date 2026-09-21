@@ -65,6 +65,8 @@ pub struct Record {
     pub installation_id: Uuid,
     pub instance_id: Uuid,
     pub operation_id: Uuid,
+    #[serde(default)]
+    pub operation_epoch: u64,
     pub operation_done: bool,
     pub operation_error: Option<Value>,
     pub operation_result: Option<Value>,
@@ -113,12 +115,13 @@ fn log_path(data: &Path, r: &Record) -> PathBuf {
 fn save_record(data: &Path, r: &Record) -> Result<()> {
     storage::publish(&record_path(data, r.installation_id), &encode(r)?, true)
 }
-fn new_record(id: Uuid, op: Uuid, plan: &LaunchPlan) -> Record {
+fn new_record(id: Uuid, op: Uuid, plan: &LaunchPlan, epoch: u64) -> Record {
     Record {
         schema_version: 1,
         installation_id: id,
         instance_id: Uuid::new_v4(),
         operation_id: op,
+        operation_epoch: epoch,
         operation_done: false,
         operation_error: None,
         operation_result: None,
@@ -208,6 +211,41 @@ pub fn history(data: &Path, id: Option<Uuid>) -> Result<Value> {
     Ok(json!({"live":false,"instances":records}))
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Wake {
+    schema_version: u32,
+    paused: bool,
+    stop_epoch: u64,
+}
+fn wake(data: &Path) -> Result<Wake> {
+    let bytes = match storage::read(&data.join("wake.json")) {
+        Ok(bytes) => bytes,
+        Err(error) if error.code == "NOT_FOUND" => {
+            return Ok(Wake {
+                schema_version: 1,
+                paused: false,
+                stop_epoch: 0,
+            });
+        }
+        Err(error) => return Err(error),
+    };
+    // Preserve the early boolean-only preference without resetting later epochs.
+    if let Ok(paused) = serde_json::from_slice::<bool>(&bytes) {
+        return Ok(Wake {
+            schema_version: 1,
+            paused,
+            stop_epoch: 0,
+        });
+    }
+    let saved: Wake =
+        serde_json::from_slice(&bytes).map_err(|_| invalid("Invalid automatic wake preference"))?;
+    if saved.schema_version != 1 {
+        return Err(invalid("Unsupported automatic wake preference version"));
+    }
+    Ok(saved)
+}
+
 pub(crate) struct Manager {
     data: PathBuf,
     handles: Mutex<BTreeMap<Uuid, Arc<Handle>>>,
@@ -242,23 +280,34 @@ impl Manager {
                 fs::remove_file(entry.path()).map_err(|e| storage::io_error(&entry.path(), e))?;
             }
         }
-        let paused = match storage::read(&data.join("wake.json")) {
-            Ok(b) => serde_json::from_slice::<bool>(&b)
-                .map_err(|_| invalid("Invalid automatic wake preference"))?,
-            Err(e) if e.code == "NOT_FOUND" => false,
-            Err(e) => return Err(e),
-        };
+        let wake = wake(data)?;
         let manager = Arc::new(Self {
             data: data.to_owned(),
             handles: Mutex::new(BTreeMap::new()),
-            paused: AtomicBool::new(paused),
-            stop_epoch: AtomicU64::new(0),
+            paused: AtomicBool::new(wake.paused),
+            stop_epoch: AtomicU64::new(wake.stop_epoch),
         });
         let mut recovered = Vec::new();
         for mut r in load_records(data)? {
             let mut live = Live::from_record(&r);
             // Reconcile all identities before advertising the management endpoint.
             live.reconcile(&manager.data, &mut r);
+            if r.operation_epoch > wake.stop_epoch {
+                return Err(invalid(
+                    "Runtime operation is newer than the saved cancellation epoch",
+                ));
+            }
+            if r.operation_epoch < wake.stop_epoch {
+                // StopAll may have crashed after publishing its global intent
+                // but before updating any per-installation record.
+                r.operation_epoch = wake.stop_epoch;
+                r.restart_after_stop = false;
+                if live.any() || r.management_uncertain || r.status.state() != State::Stopped {
+                    r.operation_id = Uuid::new_v4();
+                    r.operation_done = false;
+                    r.status.request_stop();
+                }
+            }
             if r.status.state() != State::Stopped
                 && r.status.state() != State::Stopping
                 && !live.any()
@@ -428,7 +477,7 @@ impl Manager {
         if let Some(old) = handles.get(&id) {
             retention::archive(&self.data, &old.record.lock().unwrap())?;
         }
-        let record = new_record(id, Uuid::new_v4(), &plan);
+        let record = new_record(id, Uuid::new_v4(), &plan, epoch);
         save_record(&self.data, &record)?;
         let result = receipt(&record);
         let h = Arc::new(Handle {
@@ -488,6 +537,7 @@ impl Manager {
             return Ok(receipt(&r));
         }
         r.operation_id = Uuid::new_v4();
+        r.operation_epoch = self.stop_epoch.load(Ordering::Acquire);
         r.operation_done = false;
         r.operation_error = None;
         r.operation_result = None;
@@ -514,11 +564,24 @@ impl Manager {
     pub fn stop_all(self: &Arc<Self>) -> Result<Value> {
         // Persist before cancellation. Later explicit Start remains allowed;
         // only automatic wake is paused by this preference.
-        storage::publish(&self.data.join("wake.json"), b"true", true)?;
-        self.paused.store(true, Ordering::Release);
         let ids: Vec<_> = {
             let handles = self.handles.lock().unwrap();
-            self.stop_epoch.fetch_add(1, Ordering::AcqRel);
+            let epoch = self
+                .stop_epoch
+                .load(Ordering::Acquire)
+                .checked_add(1)
+                .ok_or_else(|| invalid("Cancellation epoch exhausted"))?;
+            storage::publish(
+                &self.data.join("wake.json"),
+                &encode(&Wake {
+                    schema_version: 1,
+                    paused: true,
+                    stop_epoch: epoch,
+                })?,
+                true,
+            )?;
+            self.paused.store(true, Ordering::Release);
+            self.stop_epoch.store(epoch, Ordering::Release);
             for h in handles.values() {
                 let mut r = h.record.lock().unwrap();
                 // StopAll cancels the launch half of an accepted Restart.

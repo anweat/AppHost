@@ -616,3 +616,38 @@ fn runtime_write_failure_preserves_child_handles_for_later_stop_and_reap() {
     f.until(id, "STOPPED");
     wait(|| gone(pid));
 }
+
+#[test]
+fn stop_all_global_intent_survives_a_crash_before_individual_records_are_updated() {
+    let mut f = Fixture::new();
+    let id = f.register(json!({}), None, false);
+    f.boot();
+    f.rpc("start", json!({"installation_id":id}));
+    let original = f.until(id, "RUNNING");
+    f.crash();
+    // The global publish is the first durable step of StopAll. Per-instance
+    // restart intent deliberately remains from the previous generation.
+    fs::write(
+        f.data.join("wake.json"),
+        serde_json::to_vec(&json!({"schema_version":1,"paused":true,"stop_epoch":1})).unwrap(),
+    )
+    .unwrap();
+    let mut pending = original.clone();
+    pending["status"]["state"] = json!("STOPPING");
+    pending["restart_after_stop"] = json!(true);
+    pending["operation_done"] = json!(false);
+    fs::write(
+        f.data.join("runtime").join(format!("{id}.json")),
+        serde_json::to_vec(&pending).unwrap(),
+    )
+    .unwrap();
+    f.boot();
+    let stopped = f.until(id, "STOPPED");
+    assert_eq!(stopped["instance_id"], original["instance_id"]);
+    assert_eq!(stopped["restart_after_stop"], false);
+    // A later explicit Start is still allowed without unpausing automatic wake.
+    f.rpc("start", json!({"installation_id":id}));
+    let started = f.until(id, "RUNNING");
+    assert_ne!(started["instance_id"], original["instance_id"]);
+    assert_eq!(f.rpc("status", json!({}))["automatic_wake_paused"], true);
+}

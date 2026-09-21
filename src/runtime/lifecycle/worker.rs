@@ -311,7 +311,7 @@ pub(super) fn run(
                 {
                     let mut r = h.record.lock().unwrap();
                     retention::archive(&manager.data, &r)?;
-                    *r = new_record(id, op, &prepared);
+                    *r = new_record(id, op, &prepared, epoch);
                     save_record(&manager.data, &r)?;
                 }
                 drop(handles);
