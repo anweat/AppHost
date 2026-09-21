@@ -238,6 +238,11 @@ fn preexisting_manifests_and_legacy_records_have_unknown_creation_origin() {
     )
     .unwrap();
     let data = TempDir::new().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(data.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let first = import_with_receipts(data.path(), &scan(temp.path(), 0).unwrap())
         .unwrap()
         .remove(0);
@@ -325,6 +330,11 @@ fn launch_notes_are_shown_for_selected_candidates_refreshed_after_edit_and_liste
             .contains("missing-apphost-test-command")
     );
     let data = TempDir::new().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(data.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
     import(data.path(), &draft).unwrap();
     assert!(
         !list(data.path(), false).unwrap()[0]

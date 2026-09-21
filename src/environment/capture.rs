@@ -1,7 +1,7 @@
 use super::{Baseline, CaptureRecord, FILE_NAME, load, save, user_environment};
 use crate::{
     Error, Result,
-    process::{Group, spawn_group},
+    process::{Group, observe_exit, spawn_group},
     storage,
 };
 use std::{
@@ -67,7 +67,7 @@ pub(super) fn capture_path(data_dir: &Path, shell: &Path) -> Result<Baseline> {
     let script = format!("command printf '\\000{marker}\\000%s\\000' \"$PATH\"");
     let child = spawn_group(
         Command::new(shell)
-            .args(["-l", "-c", &script])
+            .args(["-il", "-c", &script])
             .env_clear()
             .envs(environment)
             .stdin(Stdio::null())
@@ -139,10 +139,7 @@ fn collect(session: &mut Session) -> Result<Vec<u8>> {
             ));
         }
         session.group.as_mut().unwrap().refresh()?;
-        let exit = session
-            .child
-            .try_wait()
-            .map_err(|e| failed(e.to_string()))?;
+        let exit = observe_exit(&session.child)?;
         if let Some(exit) = exit
             && polls.iter().all(|poll| poll.fd < 0)
         {

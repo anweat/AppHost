@@ -1,0 +1,36 @@
+name: Rust checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - name: Format
+        run: cargo +stable fmt --all -- --check
+      - name: Compile all targets
+        run: cargo +stable check --locked --all-targets
+      - name: Clippy
+        run: cargo +stable clippy --locked --all-targets -- -D warnings
+      - name: macOS regression suite
+        if: runner.os == 'macOS'
+        run: cargo +stable test --locked --all-targets
+      - name: Windows M0 CLI smoke
+        if: runner.os == 'Windows'
+        run: cargo +stable test --locked --test m0 cli_smoke_node_python_and_explicit_native_manifest
+      - name: Windows runtime boundary
+        if: runner.os == 'Windows'
+        run: cargo +stable test --locked --test m1_platform
+      - name: macOS logging smoke
+        if: runner.os == 'macOS'
+        run: cargo +stable run --locked --example log_probe

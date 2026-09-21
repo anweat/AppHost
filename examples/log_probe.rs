@@ -3,14 +3,17 @@
 #[cfg(target_os = "macos")]
 mod probe {
     use apphost::logs::{LogWriter, READ_CHUNK, Stream};
-    use apphost::process::Group;
+    use apphost::process::{Group, observe_exit};
     use apphost::runtime::{InstanceStatus, State};
     use std::{
         fs::{self, File},
         io::{self, BufRead, Read, Write},
         os::{
             fd::{AsRawFd, FromRawFd, OwnedFd},
-            unix::{net::UnixStream, process::CommandExt},
+            unix::{
+                net::UnixStream,
+                process::{CommandExt, ExitStatusExt},
+            },
         },
         path::{Path, PathBuf},
         process::{Child, Command, Stdio},
@@ -72,7 +75,7 @@ mod probe {
         fs::write(completion(root), b"complete")
     }
 
-    fn supervise(root: &Path) -> io::Result<()> {
+    fn supervise(root: &Path, shell: bool) -> io::Result<()> {
         let executable = std::env::current_exe()?;
         let (out_reader, out_writer) = UnixStream::pair()?;
         let (err_reader, err_writer) = UnixStream::pair()?;
@@ -84,9 +87,30 @@ mod probe {
             .stderr(Stdio::null())
             .process_group(0)
             .spawn()?;
-        let producer = Command::new(&executable)
-            .arg("--produce")
-            .arg(root)
+        let mut command = if shell {
+            let mut command = Command::new("/bin/sh");
+            command
+                .args([
+                    "-c",
+                    r#"
+printf 'before\n'
+i=0
+while [ ! -e "$1.release" ]; do
+    i=$((i + 1)); [ "$i" -lt 500 ] || exit 2
+    /bin/sleep 0.01
+done
+printf 'after\n'
+"#,
+                    "log_probe-shell",
+                ])
+                .arg(root);
+            command
+        } else {
+            let mut command = Command::new(&executable);
+            command.arg("--produce").arg(root);
+            command
+        };
+        let producer = command
             .stdin(Stdio::null())
             .stdout(Stdio::from(OwnedFd::from(out_writer)))
             .stderr(Stdio::from(OwnedFd::from(err_writer)))
@@ -128,7 +152,7 @@ mod probe {
         });
         // The fixture exposes only an explicit stop marker; collector failure does
         // not signal the producer, spawn a replacement, or repair its broken pipe.
-        while producer.try_wait()?.is_none() {
+        while observe_exit(&producer).map_err(io::Error::other)?.is_none() {
             if root.with_extension("stop").exists() {
                 status.lock().unwrap().request_stop();
                 producer_group
@@ -139,6 +163,19 @@ mod probe {
             }
             thread::sleep(Duration::from_millis(10));
         }
+        // A leader may have exited while a descendant still holds the pipes.
+        wait_for(|| {
+            producer_group
+                .refresh()
+                .is_ok_and(|members| members.is_empty())
+        })?;
+        let exit = producer.wait()?;
+        fs::write(
+            root.with_extension("exit"),
+            serde_json::to_vec(&serde_json::json!({
+                "code": exit.code(), "signal": exit.signal()
+            }))?,
+        )?;
         monitor
             .join()
             .map_err(|_| io::Error::other("Collector monitor panicked"))??;
@@ -220,8 +257,16 @@ mod probe {
     }
 
     fn fixture(root: &Path) -> io::Result<Fixture> {
+        fixture_mode(root, false)
+    }
+
+    fn fixture_mode(root: &Path, shell: bool) -> io::Result<Fixture> {
         let mut supervisor = Command::new(std::env::current_exe()?)
-            .arg("--supervise")
+            .arg(if shell {
+                "--supervise-shell"
+            } else {
+                "--supervise"
+            })
             .arg(root)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -308,6 +353,28 @@ mod probe {
         println!(
             "collector SIGKILL: FAILED with log gap; producer remains alive until explicit stop; STOPPED retains failure"
         );
+        let root = temp.path().join("shell-collector-crash");
+        let mut fixture = fixture_mode(&root, true)?;
+        assert_eq!(
+            unsafe { libc::kill(fixture.pids[0] as i32, libc::SIGKILL) },
+            0
+        );
+        wait_for(|| root.with_extension("collector-exited").exists())?;
+        fs::write(release(&root), b"go")?;
+        wait_for(|| {
+            fixture
+                .supervisor
+                .try_wait()
+                .is_ok_and(|exit| exit.is_some())
+        })?;
+        let exit: serde_json::Value =
+            serde_json::from_slice(&fs::read(root.with_extension("exit"))?)?;
+        assert_eq!(exit["signal"], libc::SIGPIPE);
+        let status: serde_json::Value =
+            serde_json::from_slice(&fs::read(root.with_extension("status"))?)?;
+        assert_eq!(status["state"], serde_json::json!(State::Failed));
+        assert_eq!(status["log_incomplete"], true);
+        println!("collector SIGKILL: shell service exits on SIGPIPE; FAILED and log gap remain");
         Ok(())
     }
 
@@ -322,7 +389,8 @@ mod probe {
         let root = Path::new(&args[2]);
         match args[1].to_str() {
             Some("--collect") => collect(root),
-            Some("--supervise") => supervise(root),
+            Some("--supervise") => supervise(root, false),
+            Some("--supervise-shell") => supervise(root, true),
             Some("--produce") => produce(root),
             _ => Err(io::Error::other("Unknown probe mode")),
         }

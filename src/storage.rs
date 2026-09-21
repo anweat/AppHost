@@ -18,6 +18,33 @@ pub fn io_error(path: &Path, error: std::io::Error) -> Error {
     Error::new(code, format!("{}: {error}", path.display()))
 }
 
+/// Create private AppHost storage without changing permissions on user directories.
+pub(crate) fn private_directory(path: &Path) -> Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path).map_err(|e| io_error(path, e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::metadata(path).map_err(|e| io_error(path, e))?;
+        if metadata.mode() & 0o077 != 0 || metadata.uid() != unsafe { libc::geteuid() } {
+            return Err(Error::new(
+                "DATA_DIR_PERMISSIONS",
+                format!(
+                    "Data directory {} must be private and owned by the current user; choose a private --data-dir. Existing permissions were preserved",
+                    path.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn read(path: &Path) -> Result<Vec<u8>> {
     let mut remaining = u64::MAX;
     read_budgeted(path, &mut remaining)

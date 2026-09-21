@@ -419,6 +419,11 @@ fn corrupted_registry_is_not_reset() {
     let path = node(temp.path(), "app");
     let data = temp.path().join("data");
     fs::create_dir(&data).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o700)).unwrap();
+    }
     fs::write(data.join("registry.json"), "broken").unwrap();
     assert_eq!(
         import(&data, &scan(&path, 0).unwrap()).unwrap_err().code,
@@ -462,6 +467,11 @@ fn failed_registry_publish_keeps_manifest_and_allows_retry() {
     let path = node(temp.path(), "app");
     let data = temp.path().join("data");
     fs::create_dir(&data).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let draft = scan(&path, 0).unwrap();
     // A nearly full valid registry fails its size boundary after the first project file is published.
     let huge_label = "x".repeat(1024 * 1024 - 300);
@@ -496,6 +506,11 @@ fn lock_contention_fails_without_writing_project_and_release_recovers() {
     let path = node(temp.path(), "app");
     let data = temp.path().join("data");
     fs::create_dir(&data).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let lock = fs::File::create(data.join("registry.lock")).unwrap();
     lock.lock_exclusive().unwrap();
     let draft = scan(&path, 0).unwrap();

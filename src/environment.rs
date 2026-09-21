@@ -43,14 +43,84 @@ fn supported() -> Result<()> {
     Ok(())
 }
 
+// Read ordered system path declarations only; never execute path_helper or profiles.
+fn system_path(paths: &Path, paths_d: &Path, homebrew: &Path) -> Result<String> {
+    let mut entries = Vec::<String>::new();
+    let mut files = vec![paths.to_owned()];
+    match fs::read_dir(paths_d) {
+        Ok(directory) => {
+            let mut extra = directory
+                .take(257)
+                .map(|entry| entry.map(|e| e.path()))
+                .collect::<std::io::Result<Vec<_>>>()
+                .map_err(|e| storage::io_error(paths_d, e))?;
+            extra.sort();
+            files.extend(extra);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(storage::io_error(paths_d, error)),
+    }
+    if files.len() > 257 {
+        return Err(Error::new(
+            "ENVIRONMENT_INVALID",
+            "Too many system PATH files",
+        ));
+    }
+    let mut remaining = 64 * 1024;
+    for file in files {
+        let bytes = match storage::read_budgeted(&file, &mut remaining) {
+            Ok(bytes) => bytes,
+            Err(error) if error.code == "NOT_FOUND" => continue,
+            Err(error) => return Err(error),
+        };
+        let content = std::str::from_utf8(&bytes)
+            .map_err(|_| Error::new("ENVIRONMENT_INVALID", "System PATH file must be UTF-8"))?;
+        for entry in content.lines().filter(|entry| !entry.is_empty()) {
+            if entry.contains(':')
+                || entry.chars().any(char::is_control)
+                || !Path::new(entry).is_absolute()
+            {
+                return Err(Error::new(
+                    "ENVIRONMENT_INVALID",
+                    "System PATH file requires one absolute directory per line",
+                ));
+            }
+            if !entries.iter().any(|previous| previous == entry) {
+                entries.push(entry.into());
+            }
+        }
+    }
+    // Keep essential system commands available when optional system files are absent.
+    for entry in SYSTEM_PATH.split(':') {
+        if !entries.iter().any(|previous| previous == entry) {
+            entries.push(entry.into());
+        }
+    }
+    if homebrew.is_dir() {
+        let entry = homebrew
+            .to_str()
+            .ok_or_else(|| Error::new("ENVIRONMENT_INVALID", "Invalid Homebrew path"))?;
+        if !entries.iter().any(|previous| previous == entry) {
+            entries.push(entry.into());
+        }
+    }
+    Ok(entries.join(":"))
+}
+
 impl Baseline {
     pub fn system() -> Result<Self> {
         supported()?;
-        Ok(Self {
+        let baseline = Self {
             schema_version: 1,
-            path: SYSTEM_PATH.into(),
+            path: system_path(
+                Path::new("/etc/paths"),
+                Path::new("/etc/paths.d"),
+                Path::new("/opt/homebrew/bin"),
+            )?,
             capture: None,
-        })
+        };
+        baseline.validate()?;
+        Ok(baseline)
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -116,13 +186,7 @@ pub fn save_path(data_dir: &Path, path: String) -> Result<Baseline> {
 // for an explicit manual set. The long shell operation never holds this lock.
 fn save(data_dir: &Path, baseline: Baseline, expected: Option<Option<String>>) -> Result<Baseline> {
     baseline.validate()?;
-    fs::create_dir_all(data_dir).map_err(|e| storage::io_error(data_dir, e))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(data_dir, fs::Permissions::from_mode(0o700))
-            .map_err(|e| storage::io_error(data_dir, e))?;
-    }
+    storage::private_directory(data_dir)?;
     let lock_path = data_dir.join("environment.lock");
     let file = OpenOptions::new()
         .read(true)
@@ -260,7 +324,9 @@ fn resolve(name: &str, cwd: &Path, path: &str) -> Result<PathBuf> {
     }
     Err(Error::new(
         "INVALID_COMMAND",
-        format!("Executable {name:?} is unavailable in the configured service cwd/PATH"),
+        format!(
+            "Executable {name:?} is unavailable in the configured service cwd/PATH; configure PATH with apphost environment set-path or explicitly run apphost environment capture --shell /bin/zsh --yes"
+        ),
     ))
 }
 
@@ -275,5 +341,39 @@ fn user_environment() -> Result<BTreeMap<String, String>> {
             "UNSUPPORTED_PLATFORM",
             "Runtime environment support requires macOS",
         ))
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+    #[test]
+    fn ordered_system_path_files_are_bounded_and_homebrew_is_explicit() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = temp.path().join("paths");
+        let extra = temp.path().join("paths.d");
+        let brew = temp.path().join("homebrew/bin");
+        fs::create_dir(&extra).unwrap();
+        fs::write(&paths, "/usr/local/bin\n/usr/bin\n/bin\n/usr/sbin\n/sbin\n").unwrap();
+        fs::write(extra.join("20-second"), "/second\n/usr/bin\n").unwrap();
+        fs::write(extra.join("10-first"), "/first\n").unwrap();
+        let expected = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/first:/second";
+        assert_eq!(system_path(&paths, &extra, &brew).unwrap(), expected);
+        fs::create_dir_all(&brew).unwrap();
+        assert_eq!(
+            system_path(&paths, &extra, &brew).unwrap(),
+            format!("{expected}:{}", brew.display())
+        );
+        fs::write(&paths, "relative\n").unwrap();
+        assert_eq!(
+            system_path(&paths, &extra, &brew).unwrap_err().code,
+            "ENVIRONMENT_INVALID"
+        );
+        fs::write(&paths, vec![b'x'; 65537]).unwrap();
+        assert!(system_path(&paths, &extra, &brew).is_err());
+        fs::remove_file(&paths).unwrap();
+        fs::remove_dir_all(&extra).unwrap();
+        fs::remove_dir_all(temp.path().join("homebrew")).unwrap();
+        assert_eq!(system_path(&paths, &extra, &brew).unwrap(), SYSTEM_PATH);
     }
 }

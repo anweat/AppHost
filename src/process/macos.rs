@@ -2,8 +2,8 @@ use super::Identity;
 use crate::{Error, Result};
 use std::{
     io, mem,
-    os::unix::process::CommandExt,
-    process::{Child, Command},
+    os::unix::process::{CommandExt, ExitStatusExt},
+    process::{Child, Command, ExitStatus},
     thread,
     time::{Duration, Instant},
 };
@@ -79,6 +79,48 @@ pub fn spawn_group(command: &mut Command) -> Result<Child> {
     command.process_group(0).spawn().map_err(system_error)
 }
 
+/// Observe without reaping: the unreaped leader pins its PID/PGID until the
+/// supervisor proves the whole group empty and explicitly calls Child::wait.
+pub fn observe_exit(child: &Child) -> Result<Option<ExitStatus>> {
+    let mut info: libc::siginfo_t = unsafe { mem::zeroed() };
+    loop {
+        let rc = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                child.id(),
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if rc == 0 {
+            break;
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ECHILD) {
+            return Err(uncertain(
+                "Child was already reaped or is not owned by this supervisor",
+            ));
+        }
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(system_error(error));
+        }
+    }
+    if info.si_pid == 0 {
+        return Ok(None);
+    }
+    let raw = if info.si_code == libc::CLD_EXITED {
+        info.si_status << 8
+    } else {
+        info.si_status
+            | if info.si_code == libc::CLD_DUMPED {
+                0x80
+            } else {
+                0
+            }
+    };
+    Ok(Some(ExitStatus::from_raw(raw)))
+}
+
 #[derive(Debug)]
 pub struct Group {
     group: u32,
@@ -90,7 +132,7 @@ pub struct Group {
 impl Group {
     /// Capture a child still owned by this supervisor; never adopt an arbitrary PID.
     pub fn capture(child: &mut Child) -> Result<Self> {
-        if child.try_wait().map_err(system_error)?.is_some() {
+        if observe_exit(child)?.is_some() {
             return Err(uncertain("Leader exited before its identity was captured"));
         }
         let leader =

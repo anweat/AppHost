@@ -105,7 +105,7 @@ enum Command {
 
 #[derive(Subcommand)]
 enum EnvironmentCommand {
-    /// Explicitly run a login shell to capture PATH. This executes shell startup scripts.
+    /// Explicitly run an interactive login shell to capture PATH. This executes shell startup scripts.
     Capture {
         #[arg(long)]
         shell: PathBuf,

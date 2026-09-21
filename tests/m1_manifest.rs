@@ -215,7 +215,15 @@ fn v1_changed_entry_requires_review_and_tampered_snapshots_are_rejected() {
     );
     let mut output = Vec::new();
     apphost::review::review(&mut draft, &mut "y\n".as_bytes(), &mut output).unwrap();
-    assert!(String::from_utf8(output).unwrap().contains("/changed"));
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("服务 web，路径 /changed"));
+    assert!(!output.contains("Some(Open"));
+    assert!(
+        draft.candidates[0]
+            .notes
+            .iter()
+            .all(|note| !note.message.contains("Some(Open"))
+    );
     apphost::import(&data, &draft).unwrap();
     let registry_path = data.join("registry.json");
     let mut registry: serde_json::Value =
@@ -377,4 +385,70 @@ fn v1_explicit_open_is_validated_on_read_without_rewriting_the_file() {
             "VALIDATION_ERROR"
         );
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_first_v1_import_then_v0_edit_can_retry_migration() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    let old = project(temp.path(), "old", 0);
+    let id = apphost::import(&data, &apphost::scan(&old, 0).unwrap()).unwrap()[0].installation_id;
+    let new = temp.path().join("new");
+    fs::create_dir(&new).unwrap();
+    fs::write(new.join("package.json"), r#"{"scripts":{"dev":"vite"}}"#).unwrap();
+    let mut draft = apphost::scan(&new, 0).unwrap();
+    draft.schema_version = 1;
+    draft.candidates[0]
+        .manifest
+        .as_mut()
+        .unwrap()
+        .schema_version = 1;
+    fs::set_permissions(&new, fs::Permissions::from_mode(0o500)).unwrap();
+    let result = apphost::import(&data, &draft);
+    fs::set_permissions(&new, fs::Permissions::from_mode(0o700)).unwrap();
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let error = result.unwrap_err();
+    assert!(error.details["completed"].as_array().unwrap().is_empty());
+    let previous = fs::read(data.join("registry.v0.backup.json")).unwrap();
+    apphost::label(&data, id, "renamed after failure").unwrap();
+    let current = fs::read(data.join("registry.json")).unwrap();
+    assert_ne!(previous, current);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&current).unwrap()["schema_version"],
+        0
+    );
+    apphost::import(&data, &draft).unwrap();
+    assert_eq!(
+        fs::read(data.join("registry.v0.backup.json")).unwrap(),
+        current
+    );
+    assert_eq!(apphost::list(&data, false).unwrap().len(), 2);
+}
+
+#[test]
+fn relink_refreshes_provisional_v0_backup_and_preserves_identity() {
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    let old = project(temp.path(), "old", 0);
+    let id = apphost::import(&data, &apphost::scan(&old, 0).unwrap()).unwrap()[0].installation_id;
+    fs::copy(
+        data.join("registry.json"),
+        data.join("registry.v0.backup.json"),
+    )
+    .unwrap();
+    apphost::label(&data, id, "new label").unwrap();
+    let current = fs::read(data.join("registry.json")).unwrap();
+    let moved = temp.path().join("moved");
+    fs::rename(old, &moved).unwrap();
+    let updated = apphost::relink(&data, id, &moved).unwrap();
+    assert_eq!(updated.installation_id, id);
+    assert_eq!(updated.human_label, "new label");
+    assert_eq!(
+        fs::read(data.join("registry.v0.backup.json")).unwrap(),
+        current
+    );
 }

@@ -409,6 +409,11 @@ fn manifest_published_after_scan_is_also_read_only_during_review() {
     node(temp.path());
     let mut draft = scan(temp.path(), 0).unwrap();
     let data = TempDir::new().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(data.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
     import(data.path(), &draft).unwrap();
     let original = fs::read(temp.path().join("apphost.toml")).unwrap();
     draft.candidates[0].selected = false;

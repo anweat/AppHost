@@ -19,7 +19,10 @@ fn shared_path_defaults_are_read_only_and_manual_updates_are_private() {
     use std::os::unix::fs::PermissionsExt;
     let temp = TempDir::new().unwrap();
     let data = temp.path().join("data");
-    assert_eq!(environment::load(&data).unwrap().path, SYSTEM_PATH);
+    assert_eq!(
+        environment::load(&data).unwrap().path,
+        Baseline::system().unwrap().path
+    );
     assert!(!data.exists());
     for path in [
         "", ".", "~/bin", "$PATH", "/bin:", ":/bin", "/a\n/bin", "/a\0/bin",
@@ -91,7 +94,9 @@ fn final_environment_is_explicit_and_service_overrides_win() {
 #[test]
 fn malformed_settings_are_not_reset_and_update_lock_is_observed() {
     use fs2::FileExt;
+    use std::os::unix::fs::PermissionsExt;
     let temp = TempDir::new().unwrap();
+    fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
     environment::save_path(temp.path(), SYSTEM_PATH.into()).unwrap();
     let config = temp.path().join("environment.json");
     let original = fs::read(&config).unwrap();
@@ -238,4 +243,32 @@ fn cli_environment_check_uses_saved_path_and_never_executes_a_project() {
     assert_eq!(services["services"][0]["name"], "service");
     assert!(!String::from_utf8_lossy(&checked.stdout).contains("do-not-print-this-value"));
     assert!(!project.join("should-not-run").exists());
+}
+
+#[test]
+fn existing_shared_directory_is_rejected_without_permission_or_file_changes() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("shared");
+    fs::create_dir(&data).unwrap();
+    fs::set_permissions(&data, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(data.join("unrelated"), b"keep").unwrap();
+    assert_eq!(
+        environment::save_path(&data, SYSTEM_PATH.into())
+            .unwrap_err()
+            .code,
+        "DATA_DIR_PERMISSIONS"
+    );
+    assert_eq!(
+        apphost::detach(&data, uuid::Uuid::new_v4())
+            .unwrap_err()
+            .code,
+        "DATA_DIR_PERMISSIONS"
+    );
+    assert_eq!(
+        fs::metadata(&data).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+    assert_eq!(fs::read(data.join("unrelated")).unwrap(), b"keep");
+    assert_eq!(fs::read_dir(&data).unwrap().count(), 1);
 }

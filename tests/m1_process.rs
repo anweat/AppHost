@@ -1,5 +1,5 @@
 #![cfg(target_os = "macos")]
-use apphost::process::{Group, spawn_group};
+use apphost::process::{Group, observe_exit, spawn_group};
 use std::{
     fs,
     path::Path,
@@ -106,12 +106,15 @@ fn known_descendant_survives_leader_exit_and_is_stopped_with_bounded_escalation(
         .parse()
         .unwrap();
     fs::write(temp.path().join("release-leader"), b"exit").unwrap();
-    wait_for(|| owned.child.try_wait().unwrap().is_some());
+    wait_for(|| observe_exit(&owned.child).unwrap().is_some());
+    // Repeated observation must not consume the wait status or release the PID.
+    assert!(observe_exit(&owned.child).unwrap().unwrap().success());
     let members = group.refresh().unwrap();
     assert_eq!(members.len(), 1);
     assert_eq!(members[0].pid, leaf);
     assert!(group.stop(Duration::from_millis(50)).unwrap());
     assert!(group.refresh().unwrap().is_empty());
+    assert!(owned.child.wait().unwrap().success());
 }
 
 #[test]
@@ -123,7 +126,7 @@ fn unknown_survivor_is_not_adopted_or_signalled() {
     // A separate verified handle is retained exclusively for fixture cleanup.
     owned.group.as_mut().unwrap().refresh().unwrap();
     fs::write(temp.path().join("release-leader"), b"exit").unwrap();
-    wait_for(|| owned.child.try_wait().unwrap().is_some());
+    wait_for(|| observe_exit(&owned.child).unwrap().is_some());
     let error = unobserved.stop(Duration::from_millis(50)).unwrap_err();
     assert_eq!(error.code, "MANAGEMENT_UNCERTAIN");
     assert_eq!(owned.group.as_mut().unwrap().refresh().unwrap().len(), 1);

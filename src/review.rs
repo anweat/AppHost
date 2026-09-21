@@ -180,7 +180,7 @@ fn show_declarations(
             .map_err(|e| Error::new("IO_ERROR", e.to_string()))?;
         }
         if manifest.schema_version == 1 {
-            writeln!(output, "  open={:?}", manifest.open)
+            writeln!(output, "  入口：{}", manifest.open_summary())
                 .map_err(|e| Error::new("IO_ERROR", e.to_string()))?;
         }
         for service in &manifest.services {

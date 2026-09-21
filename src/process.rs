@@ -24,6 +24,11 @@ pub fn spawn_group(_: &mut std::process::Command) -> crate::Result<std::process:
 }
 
 #[cfg(not(target_os = "macos"))]
+pub fn observe_exit(_: &std::process::Child) -> crate::Result<Option<std::process::ExitStatus>> {
+    Err(unsupported())
+}
+
+#[cfg(not(target_os = "macos"))]
 pub struct Group;
 
 #[cfg(not(target_os = "macos"))]

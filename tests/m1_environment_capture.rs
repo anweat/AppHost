@@ -123,6 +123,31 @@ fn cli_requires_explicit_execution_flag_and_captures_only_when_requested() {
         String::from_utf8_lossy(&output.stderr)
     );
     let saved: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(saved["path"], SYSTEM_PATH);
+    assert_eq!(saved["path"], environment::Baseline::system().unwrap().path);
     assert!(saved["capture"]["captured_at_ms"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn interactive_zsh_reads_fixture_zshrc_without_reading_user_profiles() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile = temp.path().join("profiles");
+    fs::create_dir(&profile).unwrap();
+    fs::write(profile.join(".zshenv"), "unsetopt GLOBAL_RCS\n").unwrap();
+    fs::write(
+        profile.join(".zshrc"),
+        "export PATH=/fixture-nvm/bin:/fixture-pyenv/shims:/usr/bin:/bin\n",
+    )
+    .unwrap();
+    let executable = shell(
+        temp.path(),
+        &format!(
+            "export ZDOTDIR='{}'\nexport HOME=\"$ZDOTDIR\"\nexec /bin/zsh \"$@\"",
+            profile.display()
+        ),
+    );
+    let result = environment::capture_path(&temp.path().join("data"), &executable).unwrap();
+    assert_eq!(
+        result.path,
+        "/fixture-nvm/bin:/fixture-pyenv/shims:/usr/bin:/bin"
+    );
 }

@@ -228,10 +228,19 @@ fn upgrade(data_dir: &Path, registry: &mut Registry) -> Result<()> {
         let backup = data_dir.join("registry.v0.backup.json");
         match storage::read(&backup) {
             Ok(previous) if previous == bytes => {}
+            // A failed import can leave a provisional backup while the live registry
+            // remains v0. Refresh that v0 snapshot on retry; a published v1 never
+            // reaches this branch, so its migration backup remains immutable.
+            Ok(previous)
+                if serde_json::from_slice::<Registry>(&previous)
+                    .is_ok_and(|old| old.schema_version == 0) =>
+            {
+                storage::publish(&backup, &bytes, true)?;
+            }
             Ok(_) => {
                 return Err(Error::new(
                     "CONFLICT",
-                    "Registry v0 backup differs; preserve it and choose a new data directory or resolve the backup explicitly",
+                    "Registry backup is not a v0 registry; preserve or move that file before retrying",
                 ));
             }
             Err(error) if error.code == "NOT_FOUND" => storage::publish(&backup, &bytes, false)?,
@@ -253,13 +262,7 @@ impl Drop for RegistryLock {
 }
 
 fn lock(data_dir: &Path) -> Result<RegistryLock> {
-    fs::create_dir_all(data_dir).map_err(|e| storage::io_error(data_dir, e))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(data_dir, fs::Permissions::from_mode(0o700))
-            .map_err(|e| storage::io_error(data_dir, e))?;
-    }
+    storage::private_directory(data_dir)?;
     let path = data_dir.join("registry.lock");
     let file = OpenOptions::new()
         .create(true)
@@ -895,12 +898,13 @@ fn mark_launch_changes(registry: &Registry, draft: &mut Draft) {
             candidate.notes.push(Issue::new(
                 "launch_change",
                 format!(
-                    "入口：旧 {:?}；新 {:?}",
+                    "入口：旧 {}；新 {}",
                     previous
                         .confirmed_manifest
                         .as_ref()
-                        .and_then(|m| m.open.as_ref()),
-                    manifest.open
+                        .map(|m| m.open_summary())
+                        .unwrap_or_else(|| "入口未保存，无法还原旧声明".into()),
+                    manifest.open_summary()
                 ),
             ));
         }

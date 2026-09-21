@@ -160,6 +160,13 @@ pub fn relative_directory(root: &Path, cwd: &str) -> Result<()> {
 }
 
 impl Manifest {
+    pub fn open_summary(&self) -> String {
+        match &self.open {
+            Some(open) => format!("服务 {}，路径 {}", open.service, open.path),
+            None => "未显式指定；使用唯一声明端口的服务".into(),
+        }
+    }
+
     /// Versioned launch declaration digest. Cosmetic edits do not revoke confirmation.
     /// M1 must compare this on the validated snapshot it will execute, immediately before launch.
     /// This does not attest to executable/script contents, installed dependencies or PATH changes.
