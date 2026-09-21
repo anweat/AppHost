@@ -1,5 +1,7 @@
 //! Byte-preserving, bounded log segments. Observation order is not application causality.
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+mod window;
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
@@ -7,14 +9,39 @@ use std::{
     path::PathBuf,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
+pub use window::{LogChunk, LogWindow, read_window};
 
 pub const READ_CHUNK: usize = 4096;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Stream {
     Stdout,
     Stderr,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raw_success_then_index_failure_cannot_be_retried_as_complete_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("partial");
+        let mut writer = LogWriter::create(root.clone(), 1024, 2).unwrap();
+        // A read-only index descriptor forces failure after the raw bytes were
+        // accepted, exercising the non-atomic boundary without a fake storage layer.
+        writer.index = File::open(root.join("0/index.jsonl")).unwrap();
+        assert!(writer.append("web", Stream::Stdout, b"unindexed").is_err());
+        assert_eq!(fs::read(root.join("0/web.out")).unwrap(), b"unindexed");
+        assert!(fs::read(root.join("0/index.jsonl")).unwrap().is_empty());
+        writer.index = OpenOptions::new()
+            .append(true)
+            .open(root.join("0/index.jsonl"))
+            .unwrap();
+        assert!(writer.append("web", Stream::Stdout, b"retry").is_err());
+        assert_eq!(fs::read(root.join("0/web.out")).unwrap(), b"unindexed");
+    }
 }
 
 #[derive(Serialize)]
@@ -39,6 +66,7 @@ pub struct LogWriter {
     started: Instant,
     index: File,
     files: BTreeMap<(String, Stream), (File, u64)>,
+    failed: bool,
 }
 
 impl LogWriter {
@@ -72,10 +100,16 @@ impl LogWriter {
             started: Instant::now(),
             index,
             files: BTreeMap::new(),
+            failed: false,
         })
     }
 
     pub fn append(&mut self, key: &str, stream: Stream, bytes: &[u8]) -> io::Result<()> {
+        if self.failed {
+            return Err(io::Error::other(
+                "Log writer closed after an earlier IO failure",
+            ));
+        }
         if key.is_empty()
             || key.len() > 64
             || !key
@@ -95,7 +129,12 @@ impl LogWriter {
             ));
         }
         for chunk in bytes.chunks(READ_CHUNK.min(self.segment_limit / 2)) {
-            self.write_chunk(key, stream, chunk)?;
+            if let Err(error) = self.write_chunk(key, stream, chunk) {
+                // A partial raw/index write cannot be retried as if it were atomic.
+                // End this collector; the supervisor records the gap and retains services.
+                self.failed = true;
+                return Err(error);
+            }
         }
         Ok(())
     }

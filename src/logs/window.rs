@@ -1,0 +1,163 @@
+use super::Stream;
+use serde::{Deserialize, Serialize};
+use std::{
+    fs::{self, File},
+    io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
+    path::Path,
+};
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct LogChunk {
+    pub sequence: u64,
+    pub observed_ms: u128,
+    pub elapsed_ms: u128,
+    pub service_key: String,
+    pub stream: Stream,
+    pub segment: u64,
+    pub offset: u64,
+    pub length: usize,
+    #[serde(default)]
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct LogWindow {
+    pub chunks: Vec<LogChunk>,
+    pub prefix_evicted: bool,
+    pub incomplete_tail: bool,
+    pub truncated: bool,
+    pub sequence_gap: bool,
+    pub clock_reversed: bool,
+}
+
+fn invalid(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
+fn open_file(path: &Path) -> io::Result<File> {
+    // A corrupt observation must never redirect a read outside its private log tree.
+    if !fs::symlink_metadata(path)?.is_file() {
+        return Err(invalid("Expected a regular log file"));
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    options.open(path)
+}
+
+/// Bounded observation-window read. Flags describe observed gaps, not a guarantee
+/// that a future 10-second tail has elapsed or that the collector stayed alive.
+/// A concurrent rotation may return NotFound; the caller must report that gap.
+pub fn read_window(
+    root: &Path,
+    from_ms: u128,
+    to_ms: u128,
+    max_bytes: usize,
+) -> io::Result<LogWindow> {
+    if from_ms > to_ms || !(1..=1024 * 1024).contains(&max_bytes) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid log window or byte limit",
+        ));
+    }
+    let mut segments = Vec::new();
+    for entry in fs::read_dir(root)?.take(101) {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name
+            .to_str()
+            .ok_or_else(|| invalid("Invalid segment name"))?;
+        let number: u64 = name
+            .parse()
+            .map_err(|_| invalid("Invalid segment number"))?;
+        if number.to_string() != name || !entry.file_type()?.is_dir() {
+            return Err(invalid("Invalid segment directory"));
+        }
+        segments.push(number);
+    }
+    if segments.len() > 100 {
+        return Err(invalid("Too many log segments"));
+    }
+    segments.sort_unstable();
+    let mut window = LogWindow::default();
+    let mut read_bytes = 0;
+    let mut scanned = 0usize;
+    let mut previous: Option<(u64, u128)> = None;
+    for segment in segments {
+        let directory = root.join(segment.to_string());
+        let mut reader = BufReader::new(open_file(&directory.join("index.jsonl"))?);
+        loop {
+            let mut line = Vec::new();
+            let size = (&mut reader).take(1025).read_until(b'\n', &mut line)?;
+            if size == 0 {
+                break;
+            }
+            scanned += size;
+            if size > 1024 {
+                return Err(invalid("Oversized observation"));
+            }
+            if scanned > 16 * 1024 * 1024 {
+                window.truncated = true;
+                return Ok(window);
+            }
+            if line.last() != Some(&b'\n') {
+                window.incomplete_tail = true;
+                break;
+            }
+            let mut chunk: LogChunk = serde_json::from_slice(&line).map_err(io::Error::other)?;
+            if chunk.segment != segment
+                || chunk.length == 0
+                || chunk.length > super::READ_CHUNK
+                || chunk.service_key.is_empty()
+                || chunk.service_key.len() > 64
+                || !chunk
+                    .service_key
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+                || !chunk.bytes.is_empty()
+            {
+                return Err(invalid("Invalid log observation"));
+            }
+            if let Some((sequence, timestamp)) = previous {
+                if sequence.checked_add(1) != Some(chunk.sequence) {
+                    window.sequence_gap = true;
+                }
+                if chunk.observed_ms < timestamp {
+                    window.clock_reversed = true;
+                }
+            } else if chunk.sequence > 0 && from_ms <= chunk.observed_ms {
+                window.prefix_evicted = true;
+            }
+            previous = Some((chunk.sequence, chunk.observed_ms));
+            if chunk.observed_ms < from_ms || chunk.observed_ms > to_ms {
+                continue;
+            }
+            if read_bytes + chunk.length > max_bytes || window.chunks.len() >= 4096 {
+                window.truncated = true;
+                return Ok(window);
+            }
+            let suffix = match chunk.stream {
+                Stream::Stdout => "out",
+                Stream::Stderr => "err",
+            };
+            let mut file = open_file(&directory.join(format!("{}.{suffix}", chunk.service_key)))?;
+            let end = chunk
+                .offset
+                .checked_add(chunk.length as u64)
+                .ok_or_else(|| invalid("Invalid log offset"))?;
+            if end > file.metadata()?.len() {
+                return Err(invalid("Observation exceeds raw output"));
+            }
+            file.seek(SeekFrom::Start(chunk.offset))?;
+            chunk.bytes.resize(chunk.length, 0);
+            file.read_exact(&mut chunk.bytes)?;
+            read_bytes += chunk.length;
+            window.chunks.push(chunk);
+        }
+    }
+    Ok(window)
+}

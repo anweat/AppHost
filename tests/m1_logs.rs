@@ -68,6 +68,80 @@ fn rotation_bounds_raw_and_index_even_for_tiny_writes_and_long_lines() {
         }
     }
     assert!(total <= 3072);
+    let window = apphost::logs::read_window(&root, 0, u128::MAX, 4096).unwrap();
+    assert!(window.prefix_evicted);
+    assert!(!window.sequence_gap);
+    assert!(!window.incomplete_tail);
+}
+
+#[test]
+fn observation_window_filters_time_preserves_binary_and_bounds_output() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("window");
+    let mut writer = LogWriter::create(root.clone(), 65536, 2).unwrap();
+    writer.append("web", Stream::Stdout, b"before").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    writer
+        .append("web", Stream::Stderr, &[0, 255, 128])
+        .unwrap();
+    let all = apphost::logs::read_window(&root, 0, u128::MAX, 1024).unwrap();
+    assert_eq!(all.chunks.len(), 2);
+    let timestamp = all.chunks[1].observed_ms;
+    assert!(timestamp > all.chunks[0].observed_ms);
+    let window = apphost::logs::read_window(&root, timestamp, timestamp, 3).unwrap();
+    assert_eq!(window.chunks.len(), 1);
+    assert_eq!(window.chunks[0].bytes, [0, 255, 128]);
+    assert!(!window.truncated);
+    let limited = apphost::logs::read_window(&root, 0, u128::MAX, 5).unwrap();
+    assert!(limited.truncated);
+    assert!(limited.chunks.is_empty());
+    assert!(apphost::logs::read_window(&root, 2, 1, 1024).is_err());
+    assert!(apphost::logs::read_window(&root, 0, 1, 0).is_err());
+    assert!(apphost::logs::read_window(&root, 0, 1, 1024 * 1024 + 1).is_err());
+}
+
+#[test]
+fn partial_index_and_corrupt_offsets_are_not_reported_as_complete_logs() {
+    use std::io::Write;
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("window");
+    let mut writer = LogWriter::create(root.clone(), 65536, 2).unwrap();
+    writer.append("web", Stream::Stdout, b"before").unwrap();
+    drop(writer);
+    let index = root.join("0/index.jsonl");
+    let original = fs::read(&index).unwrap();
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&index)
+        .unwrap()
+        .write_all(b"{\"sequence\":")
+        .unwrap();
+    let window = apphost::logs::read_window(&root, 0, u128::MAX, 1024).unwrap();
+    assert!(window.incomplete_tail);
+    assert_eq!(window.chunks[0].bytes, b"before");
+    let mut record: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    for (field, value) in [
+        ("offset", serde_json::json!(u64::MAX)),
+        ("service_key", serde_json::json!("../outside")),
+        ("segment", serde_json::json!(1)),
+    ] {
+        let mut corrupt = record.clone();
+        corrupt[field] = value;
+        fs::write(&index, format!("{corrupt}\n")).unwrap();
+        assert!(apphost::logs::read_window(&root, 0, u128::MAX, 1024).is_err());
+    }
+    record["sequence"] = serde_json::json!(5);
+    record["observed_ms"] = serde_json::json!(0);
+    fs::write(
+        &index,
+        [&original, format!("{record}\n").as_bytes()].concat(),
+    )
+    .unwrap();
+    let window = apphost::logs::read_window(&root, 0, u128::MAX, 1024).unwrap();
+    assert!(window.sequence_gap);
+    assert!(window.clock_reversed);
+    fs::write(&index, vec![b'a'; 1025]).unwrap();
+    assert!(apphost::logs::read_window(&root, 0, u128::MAX, 1024).is_err());
 }
 
 #[test]
@@ -95,4 +169,10 @@ fn invalid_keys_budgets_existing_directories_and_rotation_io_fail_explicitly() {
             .is_err()
     );
     assert_eq!(fs::read(root.join("1")).unwrap(), b"occupied");
+    fs::remove_file(root.join("1")).unwrap();
+    assert!(
+        writer
+            .append("web", Stream::Stdout, b"no hidden retry")
+            .is_err()
+    );
 }

@@ -1,8 +1,10 @@
 //! Executable G1 smoke probe, not a second supervisor or production launch path.
 //! Descriptor 0 receives stdout and descriptor 1 receives stderr in collector mode.
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 mod probe {
     use apphost::logs::{LogWriter, READ_CHUNK, Stream};
+    use apphost::process::Group;
+    use apphost::runtime::{InstanceStatus, State};
     use std::{
         fs::{self, File},
         io::{self, BufRead, Read, Write},
@@ -12,6 +14,7 @@ mod probe {
         },
         path::{Path, PathBuf},
         process::{Child, Command, Stdio},
+        sync::{Arc, Mutex},
         thread,
         time::{Duration, Instant},
     };
@@ -97,17 +100,56 @@ mod probe {
                 return Err(error);
             }
         };
+        let mut producer_group = match Group::capture(&mut producer) {
+            Ok(group) => group,
+            Err(error) => {
+                let _ = producer.kill();
+                let _ = producer.wait();
+                let _ = collector.kill();
+                let _ = collector.wait();
+                return Err(io::Error::other(error));
+            }
+        };
         println!("{} {}", collector.id(), producer.id());
         io::stdout().flush()?;
         let watched_root = root.to_owned();
+        let status = Arc::new(Mutex::new(InstanceStatus::default()));
+        status.lock().unwrap().all_ready();
+        let watched_status = Arc::clone(&status);
         let monitor = thread::spawn(move || -> io::Result<()> {
-            collector.wait()?;
+            let exit = collector.wait()?;
+            let mut status = watched_status.lock().unwrap();
+            status.collector_exited(exit.success());
+            fs::write(
+                watched_root.with_extension("status"),
+                serde_json::to_vec(&*status)?,
+            )?;
             fs::write(watched_root.with_extension("collector-exited"), b"exited")
         });
-        producer.wait()?;
+        // The fixture exposes only an explicit stop marker; collector failure does
+        // not signal the producer, spawn a replacement, or repair its broken pipe.
+        while producer.try_wait()?.is_none() {
+            if root.with_extension("stop").exists() {
+                status.lock().unwrap().request_stop();
+                producer_group
+                    .stop(Duration::from_secs(1))
+                    .map_err(io::Error::other)?;
+                producer.wait()?;
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
         monitor
             .join()
             .map_err(|_| io::Error::other("Collector monitor panicked"))??;
+        let mut status = status.lock().unwrap();
+        status.finish_stop(
+            producer_group
+                .refresh()
+                .map_err(io::Error::other)?
+                .is_empty(),
+        );
+        fs::write(root.with_extension("status"), serde_json::to_vec(&*status)?)?;
         Ok(())
     }
 
@@ -120,7 +162,13 @@ mod probe {
             Ok(()) => "ok".into(),
             Err(error) => format!("{:?}", error.kind()),
         };
-        fs::write(result(root), outcome)?;
+        fs::write(result(root), &outcome)?;
+        if outcome == "BrokenPipe" {
+            // A real service may catch EPIPE and stay alive. Keep that case alive
+            // until the supervisor receives the explicit user-stop fixture marker.
+            wait_for(|| root.with_extension("stop").exists())?;
+            thread::sleep(Duration::from_secs(1));
+        }
         Ok(())
     }
 
@@ -214,6 +262,20 @@ mod probe {
             b"before\nafter\x00\xff\n"
         );
         assert_eq!(fs::read(root.join("0/fixture.err"))?, b"stderr-before\n");
+        let window = apphost::logs::read_window(&root, 0, u128::MAX, 1024)?;
+        let stdout: Vec<u8> = window
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.stream == Stream::Stdout)
+            .flat_map(|chunk| chunk.bytes.iter().copied())
+            .collect();
+        assert_eq!(stdout, b"before\nafter\x00\xff\n");
+        assert!(
+            !window.prefix_evicted
+                && !window.truncated
+                && !window.incomplete_tail
+                && !window.sequence_gap
+        );
         assert_eq!(fs::read_to_string(result(&root))?, "ok");
         drop(fixture);
         println!(
@@ -231,9 +293,20 @@ mod probe {
         fs::write(release(&root), b"go")?;
         wait_for(|| result(&root).exists())?;
         assert_eq!(fs::read_to_string(result(&root))?, "BrokenPipe");
+        let status: serde_json::Value =
+            serde_json::from_slice(&fs::read(root.with_extension("status"))?)?;
+        assert_eq!(status["state"], serde_json::json!(State::Failed));
+        assert_eq!(status["log_incomplete"], true);
+        assert_eq!(unsafe { libc::kill(fixture.pids[1] as i32, 0) }, 0);
+        assert!(fixture.supervisor.try_wait()?.is_none());
+        fs::write(root.with_extension("stop"), b"explicit stop")?;
         wait_for(|| fixture.supervisor.try_wait().is_ok_and(|s| s.is_some()))?;
+        let status: serde_json::Value =
+            serde_json::from_slice(&fs::read(root.with_extension("status"))?)?;
+        assert_eq!(status["state"], serde_json::json!(State::Stopped));
+        assert_eq!(status["log_incomplete"], true);
         println!(
-            "collector SIGKILL: producer sees BrokenPipe; failure policy requires an explicit product decision"
+            "collector SIGKILL: FAILED with log gap; producer remains alive until explicit stop; STOPPED retains failure"
         );
         Ok(())
     }
@@ -257,15 +330,15 @@ mod probe {
 }
 
 fn main() -> std::io::Result<()> {
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     {
         probe::run()
     }
-    #[cfg(not(unix))]
+    #[cfg(not(target_os = "macos"))]
     {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "This process probe requires Unix",
+            "UNSUPPORTED_PLATFORM: this process probe requires macOS",
         ))
     }
 }

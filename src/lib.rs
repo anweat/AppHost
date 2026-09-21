@@ -3,9 +3,11 @@ mod git_metadata;
 mod launch;
 pub mod logs;
 pub mod manifest;
+pub mod process;
 pub mod registry;
 pub mod review;
 pub mod rules;
+pub mod runtime;
 mod storage;
 
 use serde::Serialize;
