@@ -1,0 +1,12 @@
+# Interface example for a ComfyUI root (Python/PyTorch + aiohttp).
+# The caller must choose its existing Python environment; AppHost does not install it.
+schema_version = 0
+project_id = "6c414068-5823-4777-902e-9b88a88e2254"
+name = "ComfyUI"
+description = "本地图像工作流"
+
+[[services]]
+name = "server"
+cwd = "."
+command = ["python", "main.py", "--listen", "127.0.0.1", "--port", "8188"]
+port = 8188

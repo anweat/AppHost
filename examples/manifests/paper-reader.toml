@@ -1,0 +1,18 @@
+# Interface example for a Paper Reader project root (FastAPI + React/Vite).
+# Replace the example UUID for a new logical project; copies share the chosen UUID.
+schema_version = 0
+project_id = "27c22e74-70fd-454a-bb90-dcfb2233ba13"
+name = "Paper Reader"
+description = "论文 PDF 翻译与辅助阅读"
+
+[[services]]
+name = "backend"
+cwd = "."
+command = ["uv", "run", "uvicorn", "backend.main:app", "--host", "127.0.0.1", "--port", "8000"]
+port = 8000
+
+[[services]]
+name = "frontend"
+cwd = "web"
+command = ["npm", "run", "dev", "--", "--host", "127.0.0.1", "--port", "5173"]
+port = 5173

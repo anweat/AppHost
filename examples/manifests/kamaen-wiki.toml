@@ -1,0 +1,12 @@
+# Interface example for the Kamaen_Info/wiki root (Node + React/Vite/Three.js).
+# The project owns the dev script, including its content sync step.
+schema_version = 0
+project_id = "d2dd2a48-d78b-4dbe-894c-9afc213eed56"
+name = "Kamaen Fieldnotes"
+description = "本地资料与开发入口"
+
+[[services]]
+name = "web"
+cwd = "."
+command = ["npm", "run", "dev"]
+port = 4173
