@@ -15,10 +15,17 @@ use std::{
 };
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+mod launch;
+pub use launch::{LaunchSnapshot, launch_snapshot};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Installation {
     pub installation_id: Uuid,
+    // Zero denotes a historical record. Only registry writes initialize/advance
+    // this counter; reads cannot manufacture a new confirmation or revision.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub revision: u64,
     pub project_id: Uuid,
     pub path: PathBuf,
     pub human_label: String,
@@ -43,11 +50,15 @@ pub struct Installation {
     pub confirmed_root: Option<PathBuf>,
 }
 
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
 fn legacy_custom_label() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreatedManifest {
     pub sha256: String,
@@ -162,7 +173,9 @@ fn load_budgeted(data_dir: &Path, remaining: &mut u64) -> Result<Registry> {
                 || !valid_text(&i.human_label)
                 || i.confirmed_root.as_ref().is_some_and(|p| !p.is_absolute())
                 || (registry.schema_version == 0
-                    && (i.confirmed_manifest.is_some() || i.confirmed_root.is_some()))
+                    && (i.confirmed_manifest.is_some()
+                        || i.confirmed_root.is_some()
+                        || i.revision != 0))
                 || i.confirmed_launch_sha256
                     .as_ref()
                     .is_some_and(|s| s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -207,8 +220,31 @@ fn load_budgeted(data_dir: &Path, remaining: &mut u64) -> Result<Registry> {
     Ok(registry)
 }
 
-fn save(data_dir: &Path, registry: &Registry) -> Result<()> {
-    let bytes = serde_json::to_vec_pretty(registry)
+fn save(data_dir: &Path, registry: &mut Registry) -> Result<()> {
+    let previous = load(data_dir)?;
+    upgrade(data_dir, registry)?;
+    for installation in &mut registry.installations {
+        let old = previous
+            .installations
+            .iter()
+            .find(|old| old.installation_id == installation.installation_id);
+        let changed = old.is_none_or(|old| {
+            let mut old = old.clone();
+            old.revision = installation.revision;
+            old != *installation
+        });
+        let revision = old.map_or(0, |old| old.revision);
+        // A legacy v1 record may lack revision. Leave an untouched record at
+        // zero so another installation's write cannot invalidate its plan.
+        installation.revision = if changed || (previous.schema_version == 0 && revision == 0) {
+            revision
+                .checked_add(1)
+                .ok_or_else(|| Error::new("REGISTRY_INVALID", "Installation revision exhausted"))?
+        } else {
+            revision
+        };
+    }
+    let bytes = serde_json::to_vec_pretty(&*registry)
         .map_err(|e| Error::new("REGISTRY_INVALID", e.to_string()))?;
     if bytes.len() > storage::MAX_BYTES as usize {
         return Err(Error::new("REGISTRY_INVALID", "Registry exceeds 1 MiB"));
@@ -248,6 +284,11 @@ fn upgrade(data_dir: &Path, registry: &mut Registry) -> Result<()> {
         }
     }
     registry.schema_version = 1;
+    for installation in &mut registry.installations {
+        if installation.confirmed_launch_sha256.is_some() && installation.confirmed_root.is_none() {
+            installation.confirmed_root = Some(installation.path.clone());
+        }
+    }
     Ok(())
 }
 
@@ -475,12 +516,7 @@ pub fn import_with_receipts(data_dir: &Path, draft: &Draft) -> Result<Vec<Import
             ));
         }
     }
-    if selected
-        .iter()
-        .any(|c| c.manifest.as_ref().is_some_and(|m| m.schema_version == 1))
-    {
-        upgrade(data_dir, &mut registry)?;
-    }
+    upgrade(data_dir, &mut registry)?;
     let mut completed = Vec::new();
     for candidate in selected {
         let mut created_files = Vec::new();
@@ -541,6 +577,7 @@ pub fn import_with_receipts(data_dir: &Path, draft: &Draft) -> Result<Vec<Import
                     unique_label(&registry, &candidate.human_label, &candidate.path, None);
                 let installation = Installation {
                     installation_id: id,
+                    revision: 0,
                     project_id: manifest.project_id,
                     path: candidate.path.clone(),
                     human_label,
@@ -563,8 +600,13 @@ pub fn import_with_receipts(data_dir: &Path, draft: &Draft) -> Result<Vec<Import
                 registry.installations.push(installation.clone());
                 installation
             };
-            save(data_dir, &registry)?;
-            Ok(installation)
+            save(data_dir, &mut registry)?;
+            Ok(registry
+                .installations
+                .iter()
+                .find(|saved| saved.installation_id == installation.installation_id)
+                .unwrap()
+                .clone())
         })();
         match result {
             Ok(installation) => completed.push(ImportReceipt {
@@ -685,9 +727,13 @@ pub fn label(data_dir: &Path, id: Uuid, value: &str) -> Result<Installation> {
         .ok_or_else(|| Error::new("NOT_FOUND", "Unknown installation_id"))?;
     installation.human_label = value.into();
     installation.label_is_custom = true;
-    let result = installation.clone();
-    save(data_dir, &registry)?;
-    Ok(result)
+    save(data_dir, &mut registry)?;
+    Ok(registry
+        .installations
+        .iter()
+        .find(|saved| saved.installation_id == id)
+        .unwrap()
+        .clone())
 }
 
 fn unique_label(registry: &Registry, base: &str, path: &Path, except: Option<Uuid>) -> String {
@@ -755,8 +801,18 @@ pub fn detach_many(data_dir: &Path, ids: &[Uuid]) -> Result<Vec<Installation>> {
         installation.detached = true;
         results.push(installation.clone());
     }
-    save(data_dir, &registry)?;
-    Ok(results)
+    save(data_dir, &mut registry)?;
+    Ok(results
+        .into_iter()
+        .map(|result| {
+            registry
+                .installations
+                .iter()
+                .find(|saved| saved.installation_id == result.installation_id)
+                .unwrap()
+                .clone()
+        })
+        .collect())
 }
 
 pub fn relink(data_dir: &Path, id: Uuid, path: &Path) -> Result<Installation> {
@@ -801,9 +857,8 @@ pub fn relink(data_dir: &Path, id: Uuid, path: &Path) -> Result<Installation> {
             Some(registry.installations[index].path.clone());
     }
     registry.installations[index].path = target;
-    let result = registry.installations[index].clone();
-    save(data_dir, &registry)?;
-    Ok(result)
+    save(data_dir, &mut registry)?;
+    Ok(registry.installations[index].clone())
 }
 
 pub fn associate(data_dir: &Path, draft: &mut Draft, path: &Path, id: Uuid) -> Result<()> {
@@ -848,9 +903,13 @@ fn update(
         .find(|i| i.installation_id == id)
         .ok_or_else(|| Error::new("NOT_FOUND", "Unknown installation_id"))?;
     mutate(installation);
-    let result = installation.clone();
-    save(data_dir, &registry)?;
-    Ok(result)
+    save(data_dir, &mut registry)?;
+    Ok(registry
+        .installations
+        .iter()
+        .find(|saved| saved.installation_id == id)
+        .unwrap()
+        .clone())
 }
 
 /// Refresh trust diagnostics for CLI review, including drafts created without registry context.

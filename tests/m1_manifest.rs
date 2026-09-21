@@ -29,6 +29,27 @@ fn project(parent: &Path, name: &str, version: u32) -> std::path::PathBuf {
     path
 }
 
+// Genuine historical wire input: current imports now write Registry v1 even
+// when the project's manifest is v0. Never use a new import as a v0 fixture.
+fn legacy_registry(data: &Path) {
+    let path = data.join("registry.json");
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    value["schema_version"] = 0.into();
+    for installation in value["installations"].as_array_mut().unwrap() {
+        for key in ["revision", "confirmed_root", "confirmed_manifest"] {
+            installation.as_object_mut().unwrap().remove(key);
+        }
+    }
+    fs::write(path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+}
+
+fn legacy_label(data: &Path, label: &str) {
+    let path = data.join("registry.json");
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    value["installations"][0]["human_label"] = label.into();
+    fs::write(path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+}
+
 #[test]
 fn legacy_digest_is_a_fixed_wire_contract() {
     let manifest = declaration(0);
@@ -144,6 +165,7 @@ fn migration_preserves_original_bytes_identity_and_old_confirmation() {
     let old = apphost::import(&data, &apphost::scan(&old_root, 0).unwrap())
         .unwrap()
         .remove(0);
+    legacy_registry(&data);
     let bytes = fs::read(data.join("registry.json")).unwrap();
     let new_root = project(temp.path(), "new", 1);
     let draft = apphost::scan(&new_root, 0).unwrap();
@@ -304,6 +326,7 @@ fn version_mismatch_and_conflicting_backup_do_not_mutate_registry() {
     let data = temp.path().join("data");
     let old = project(temp.path(), "old", 0);
     apphost::import(&data, &apphost::scan(&old, 0).unwrap()).unwrap();
+    legacy_registry(&data);
     let original = fs::read(data.join("registry.json")).unwrap();
     let new = project(temp.path(), "new", 1);
     let mut draft = apphost::scan(&new, 0).unwrap();
@@ -394,7 +417,8 @@ fn failed_first_v1_import_then_v0_edit_can_retry_migration() {
     let temp = TempDir::new().unwrap();
     let data = temp.path().join("data");
     let old = project(temp.path(), "old", 0);
-    let id = apphost::import(&data, &apphost::scan(&old, 0).unwrap()).unwrap()[0].installation_id;
+    apphost::import(&data, &apphost::scan(&old, 0).unwrap()).unwrap();
+    legacy_registry(&data);
     let new = temp.path().join("new");
     fs::create_dir(&new).unwrap();
     fs::write(new.join("package.json"), r#"{"scripts":{"dev":"vite"}}"#).unwrap();
@@ -414,7 +438,7 @@ fn failed_first_v1_import_then_v0_edit_can_retry_migration() {
     let error = result.unwrap_err();
     assert!(error.details["completed"].as_array().unwrap().is_empty());
     let previous = fs::read(data.join("registry.v0.backup.json")).unwrap();
-    apphost::label(&data, id, "renamed after failure").unwrap();
+    legacy_label(&data, "renamed by historical v0 writer after failure");
     let current = fs::read(data.join("registry.json")).unwrap();
     assert_ne!(previous, current);
     assert_eq!(
@@ -435,12 +459,13 @@ fn relink_refreshes_provisional_v0_backup_and_preserves_identity() {
     let data = temp.path().join("data");
     let old = project(temp.path(), "old", 0);
     let id = apphost::import(&data, &apphost::scan(&old, 0).unwrap()).unwrap()[0].installation_id;
+    legacy_registry(&data);
     fs::copy(
         data.join("registry.json"),
         data.join("registry.v0.backup.json"),
     )
     .unwrap();
-    apphost::label(&data, id, "new label").unwrap();
+    legacy_label(&data, "new label");
     let current = fs::read(data.join("registry.json")).unwrap();
     let moved = temp.path().join("moved");
     fs::rename(old, &moved).unwrap();
@@ -451,4 +476,86 @@ fn relink_refreshes_provisional_v0_backup_and_preserves_identity() {
         fs::read(data.join("registry.v0.backup.json")).unwrap(),
         current
     );
+}
+
+#[test]
+fn first_legacy_write_migrates_for_each_registration_mutation() {
+    for operation in [
+        "label",
+        "detach",
+        "retention",
+        "relink",
+        "import",
+        "detach-many",
+    ] {
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let root = project(temp.path(), "old", 0);
+        let original = apphost::import(&data, &apphost::scan(&root, 0).unwrap())
+            .unwrap()
+            .remove(0);
+        legacy_registry(&data);
+        let before = fs::read(data.join("registry.json")).unwrap();
+        let updated = match operation {
+            "label" => apphost::label(&data, original.installation_id, "changed").unwrap(),
+            "detach" => apphost::detach(&data, original.installation_id).unwrap(),
+            "retention" => apphost::retention(
+                &data,
+                original.installation_id,
+                apphost::registry::RetentionPolicy::Dormant,
+            )
+            .unwrap(),
+            "relink" => {
+                let moved = temp.path().join("moved");
+                fs::rename(&root, &moved).unwrap();
+                apphost::relink(&data, original.installation_id, &moved).unwrap()
+            }
+            "import" => apphost::import(&data, &apphost::scan(&root, 0).unwrap())
+                .unwrap()
+                .remove(0),
+            _ => apphost::registry::detach_many(
+                &data,
+                &[original.installation_id, original.installation_id],
+            )
+            .unwrap()
+            .remove(0),
+        };
+        assert_eq!(updated.installation_id, original.installation_id);
+        assert_eq!(
+            updated.confirmed_launch_sha256,
+            original.confirmed_launch_sha256
+        );
+        assert_eq!(updated.revision, 1, "{operation}");
+        assert_eq!(
+            fs::read(data.join("registry.v0.backup.json")).unwrap(),
+            before
+        );
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(data.join("registry.json")).unwrap()).unwrap();
+        assert_eq!(saved["schema_version"], 1);
+        assert_eq!(saved["installations"][0]["revision"], updated.revision);
+    }
+}
+
+#[test]
+fn revision_overflow_rejects_changes_without_wrapping_or_resetting() {
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    let root = project(temp.path(), "app", 1);
+    let id = apphost::import(&data, &apphost::scan(&root, 0).unwrap()).unwrap()[0].installation_id;
+    apphost::label(&data, id, "custom").unwrap();
+    let path = data.join("registry.json");
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    value["installations"][0]["revision"] = u64::MAX.into();
+    fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    assert_eq!(
+        apphost::label(&data, id, "custom").unwrap().revision,
+        u64::MAX
+    );
+    let before = fs::read(&path).unwrap();
+    assert_eq!(
+        apphost::label(&data, id, "changed").unwrap_err().code,
+        "REGISTRY_INVALID"
+    );
+    assert_eq!(fs::read(&path).unwrap(), before);
 }

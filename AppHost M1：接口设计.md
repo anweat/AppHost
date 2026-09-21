@@ -49,7 +49,7 @@ stop_timeout_ms = 5000
 
 登记确认在 installation 上记录声明版本和确认摘要，完整快照只用于比较；不能由当前清单反推未知旧快照。Registry v0 中的 confirmed_services 仍以 Manifest v0 解释。
 
-Registry v1 的快照使用 `confirmed_manifest` 保存与确认摘要匹配的完整声明；保留 `confirmed_services` 供旧输出调用方读取，但两份内容必须一致。确认上下文记录 project_root 与 manifest_source，不能把其他安装的确认直接移过来。历史 v0 读取不隐式写入；需要写入 v1 声明时，在原 registry 锁中保存权限受限的原始备份并原子发布 v1。未知版本或不匹配快照返回 REGISTRY_INVALID，不重置。若导入未完成、磁盘登记表仍为 v0，下一次迁移可用当前 v0 原始字节刷新此前暂存的 v0 备份；已经发布 v1 后备份不再改写。无法识别为 v0 的既有备份返回 CONFLICT，提示保留或移走该文件后重试。
+Registry v1 的快照使用 `confirmed_manifest` 保存与确认摘要匹配的完整声明；保留 `confirmed_services` 供旧输出调用方读取，但两份内容必须一致。确认上下文记录 project_root 与 manifest_source，不能把其他安装的确认直接移过来。历史 v0 读取不隐式写入；首次登记写入（包括 import、label、detach、retention、relink）时，在原 registry 锁中保存权限受限的原始备份并原子发布 v1。新建登记表直接采用 v1；Manifest 和 Draft v0 继续作为兼容输入。未知版本或不匹配快照返回 REGISTRY_INVALID，不重置。若导入未完成、磁盘登记表仍为 v0，下一次迁移可用当前 v0 原始字节刷新此前暂存的 v0 备份；已经发布 v1 后备份不再改写。无法识别为 v0 的既有备份返回 CONFLICT，提示保留或移走该文件后重试。
 
 ImportDraft v0 仅允许 v0 声明，保持原写入语义；包含 v1 清单时使用 Draft v1。扫描推断的新清单仍可使用 v0，不强制升级项目；现有 v1 清单必须经过同一 scan → review → import 入口。重复导入、内容复核、过期草稿、部分成功回执延续 M0。relink 成功改变根目录后清除下次启动确认，保留历史快照供比较。
 
@@ -62,6 +62,22 @@ ImportDraft v0 仅允许 v0 声明，保持原写入语义；包含 v1 清单时
 - 切换来源先校验目标，再持锁切换登记；原文件保留，不静默删除或覆盖。
 - 普通文件校验延续 `validate PATH`；外置校验显式传项目根目录，不能以清单父目录推导。
 - 活动实例上的 detach/relink/来源切换经运行协调层先停止；L0 只负责短锁、校验和持久化，不调用 daemon。
+
+## 已登记安装的启动准备
+
+`registry::launch_snapshot(data_dir, installation_id)` 只读取得当前项目内生效清单，验证登记未解除、源码根目录仍为登记的规范化目录、project_id 一致、声明结构有效且确认摘要匹配。缺失登记返回 NOT_FOUND，解除登记返回 DETACHED，源码不可用返回 SOURCE_MISSING，确认缺失或行为字段改变返回 REVIEW_REQUIRED。历史确认快照只用于核验，不能在清单缺失时充当启动声明。
+
+Registry v1 的 installation 带 `revision: u64`，从 1 起步；历史记录缺省为 0，读操作不补写。每次实际改变安装记录时递增，相同内容的幂等写入不递增；其他安装的修改不使当前安装失效。Registry v0 迁移时初始化旧记录的修订号，并补全可确定的历史确认根目录，保留原确认摘要。已有 v1 记录缺少 revision 时，只在该记录实际改变时初始化，不因其他安装的写入而失效。计数溢出明确报 REGISTRY_INVALID，不回绕或重置。该修订号只识别经过登记写入接口的变更，不用于对抗同用户直接篡改或恢复登记文件。
+
+返回的 `LaunchSnapshot` 固定 data-dir、installation、Manifest 和读取时的登记格式版本；字段不允许调用方修改，不反序列化外部提交的快照。对快照的只读访问不授予启动权限。显示名、描述、注释不会单独要求重新确认；v0 保留原摘要算法。外置清单来源切换仍遵循前一节契约。
+
+`runtime::LaunchPlan::prepare(data_dir, installation_id)` 将已确认的声明与当次共享环境组合，预检全部服务后才返回。准备过程不启动进程、不写 Runtime State、不创建配置。供 CLI 展示的 summary 只含安装 ID、项目根目录、声明版本与摘要、服务名、cwd 和解析后的可执行路径，不输出 argv、env 或历史确认快照。
+
+`LaunchPlan::with_current(self, data_dir, action)` 是运行层同步 spawn 的接入点：核对 data-dir，持登记短锁重读当前安装、清单、确认、格式版本和该安装 revision；重新检查 cwd 与可执行路径解析结果。安装已改变返回 STALE_LAUNCH，声明未经确认返回 REVIEW_REQUIRED，解除登记返回 DETACHED；均不调用 action。通过后 action 接收准备好的服务命令，锁保持到同步派发返回；无论成功或失败都会释放。action 不得等待就绪、日志或客户端 IO。只固定声明和当次环境，不签名脚本、可执行文件或依赖内容；文件系统路径核验与进程执行之间仍不是原子事务。
+
+运行层仍负责安装队列、活动实例、端口预检、先持久化启动意图、部分 spawn 失败清理与后续就绪。这个接入点不另建运行状态，不把预检通过视作 App 已运行。
+
+`environment check <路径>` 继续只检查声明与环境；`environment check --installation <UUID>` 使用上述登记信任链路，二者互斥。结果表示准备通过，不表示运行、就绪或免除启动前复核。
 
 ## 运行环境基线
 

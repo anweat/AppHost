@@ -1,6 +1,9 @@
 //! Runtime observations only: no retry engine and no implicit process actions.
 use serde::Serialize;
 
+mod launch;
+pub use launch::{LaunchPlan, LaunchSummary};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum State {

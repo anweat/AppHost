@@ -117,7 +117,16 @@ enum EnvironmentCommand {
     /// Save an absolute PATH list for future runtime launches.
     SetPath { path: String },
     /// Resolve a manifest's commands using the shared runtime environment, without executing them.
-    Check { path: PathBuf },
+    Check {
+        #[arg(
+            required_unless_present = "installation",
+            conflicts_with = "installation"
+        )]
+        path: Option<PathBuf>,
+        /// Check registration and confirmation as well as the runtime environment.
+        #[arg(long, conflicts_with = "path")]
+        installation: Option<Uuid>,
+    },
 }
 
 fn data_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
@@ -162,7 +171,20 @@ fn run(cli: Cli) -> Result<Option<Value>> {
                 EnvironmentCommand::SetPath { path } => {
                     Ok(json!(apphost::environment::save_path(&directory, path)?))
                 }
-                EnvironmentCommand::Check { path } => {
+                EnvironmentCommand::Check {
+                    installation: Some(id),
+                    ..
+                } => {
+                    let plan = apphost::runtime::LaunchPlan::prepare(&directory, id)?;
+                    Ok(json!(plan.summary()))
+                }
+                EnvironmentCommand::Check {
+                    path,
+                    installation: None,
+                } => {
+                    let path = path.ok_or_else(|| {
+                        Error::new("INVALID_INPUT", "Expected a project path or --installation")
+                    })?;
                     let manifest = apphost::validate(&path)?;
                     let root = if path.is_dir() {
                         path.as_path()
