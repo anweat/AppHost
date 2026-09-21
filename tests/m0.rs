@@ -26,11 +26,14 @@ fn node(root: &Path, name: &str) -> PathBuf {
 
 fn declaration(name: &str, command: &[&str]) -> Manifest {
     Manifest {
+        open: None,
         schema_version: 0,
         project_id: Uuid::new_v4(),
         name: name.into(),
         description: String::new(),
         services: vec![Service {
+            startup_timeout_ms: None,
+            stop_timeout_ms: None,
             name: "app".into(),
             command: command.iter().map(|s| s.to_string()).collect(),
             cwd: ".".into(),
@@ -183,7 +186,8 @@ fn field_validation_and_working_directory_boundaries() {
     assert!(!bad.validate(root).is_empty());
     bad = good.clone();
     bad.project_id = Uuid::nil();
-    bad.schema_version = 1;
+    // Version 1 is defined by M1; unknown future versions must still fail.
+    bad.schema_version = 2;
     bad.name = " ".into();
     bad.services[0].port = Some(0);
     bad.services[0].command = vec![];
@@ -444,7 +448,7 @@ fn duplicate_paths_missing_evidence_and_invalid_versions_are_rejected() {
     draft.candidates[0].evidence[0].path = "../../secret".into();
     assert_eq!(import(&data, &draft).unwrap_err().code, "INVALID_INPUT");
     draft = original.clone();
-    draft.schema_version = 1;
+    draft.schema_version = 2;
     assert_eq!(import(&data, &draft).unwrap_err().code, "INVALID_INPUT");
     draft = original;
     draft.root = temp.path().join("data");

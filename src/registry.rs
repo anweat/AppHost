@@ -37,6 +37,10 @@ pub struct Installation {
     // It is never a runtime source of commands or environment variables.
     #[serde(default)]
     pub confirmed_services: Option<Vec<Service>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmed_manifest: Option<Manifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmed_root: Option<PathBuf>,
 }
 
 fn legacy_custom_label() -> bool {
@@ -72,6 +76,14 @@ pub struct RetainedFile {
 }
 
 impl Installation {
+    fn confirmation_matches(&self, manifest: &Manifest) -> bool {
+        self.confirmed_launch_sha256.as_deref() == Some(manifest.launch_sha256().as_str())
+            && self
+                .confirmed_root
+                .as_ref()
+                .is_none_or(|root| root == &self.path)
+    }
+
     /// A diagnostic receipt, not permission to delete. Missing or unreadable files never match.
     pub fn retained_files(&self) -> Vec<RetainedFile> {
         self.created_manifest
@@ -142,28 +154,44 @@ fn load_budgeted(data_dir: &Path, remaining: &mut u64) -> Result<Registry> {
         .map_err(|e| Error::new("REGISTRY_INVALID", e.to_string()))?;
     let mut ids = HashSet::new();
     let mut paths = HashSet::new();
-    if registry.schema_version != 0
+    if registry.schema_version > 1
         || registry.installations.iter().any(|i| {
             i.installation_id.is_nil()
                 || i.project_id.is_nil()
                 || !i.path.is_absolute()
                 || !valid_text(&i.human_label)
+                || i.confirmed_root.as_ref().is_some_and(|p| !p.is_absolute())
+                || (registry.schema_version == 0
+                    && (i.confirmed_manifest.is_some() || i.confirmed_root.is_some()))
                 || i.confirmed_launch_sha256
                     .as_ref()
                     .is_some_and(|s| s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()))
-                || i.confirmed_services.as_ref().is_some_and(|services| {
-                    // Registry v0 snapshots were confirmed as Manifest v0. Do not substitute
-                    // a future current version here: v1 needs versioned snapshot migration
-                    // that verifies the historical digest before interpreting the new schema.
-                    let saved = Manifest {
-                        schema_version: 0,
-                        project_id: i.project_id,
-                        name: String::new(),
-                        description: String::new(),
-                        services: services.clone(),
-                    };
-                    i.confirmed_launch_sha256.as_deref() != Some(saved.launch_sha256().as_str())
-                })
+                || if let Some(saved) = &i.confirmed_manifest {
+                    saved.schema_version != 1
+                        || saved.project_id != i.project_id
+                        || i.confirmed_root.is_none()
+                        || i.confirmed_services.as_ref() != Some(&saved.services)
+                        || i.confirmed_launch_sha256.as_deref()
+                            != Some(saved.launch_sha256().as_str())
+                } else {
+                    i.confirmed_services.as_ref().is_some_and(|services| {
+                        // Legacy service-only snapshots retain the exact v0 digest,
+                        // even when their registry also contains v1 confirmations.
+                        let saved = Manifest {
+                            open: None,
+                            schema_version: 0,
+                            project_id: i.project_id,
+                            name: String::new(),
+                            description: String::new(),
+                            services: services.clone(),
+                        };
+                        services
+                            .iter()
+                            .any(|s| s.startup_timeout_ms.is_some() || s.stop_timeout_ms.is_some())
+                            || i.confirmed_launch_sha256.as_deref()
+                                != Some(saved.launch_sha256().as_str())
+                    })
+                }
                 || i.created_manifest.as_ref().is_some_and(|m| {
                     m.sha256.len() != 64 || !m.sha256.bytes().all(|b| b.is_ascii_hexdigit())
                 })
@@ -188,6 +216,32 @@ fn save(data_dir: &Path, registry: &Registry) -> Result<()> {
     storage::publish(&data_dir.join("registry.json"), &bytes, true)
 }
 
+// Called under registry.lock after batch preflight. The original bytes are the
+// rollback artifact, not a reconstructed registry with newly defaulted fields.
+fn upgrade(data_dir: &Path, registry: &mut Registry) -> Result<()> {
+    if registry.schema_version == 1 {
+        return Ok(());
+    }
+    let path = data_dir.join("registry.json");
+    if path.exists() {
+        let bytes = storage::read(&path)?;
+        let backup = data_dir.join("registry.v0.backup.json");
+        match storage::read(&backup) {
+            Ok(previous) if previous == bytes => {}
+            Ok(_) => {
+                return Err(Error::new(
+                    "CONFLICT",
+                    "Registry v0 backup differs; preserve it and choose a new data directory or resolve the backup explicitly",
+                ));
+            }
+            Err(error) if error.code == "NOT_FOUND" => storage::publish(&backup, &bytes, false)?,
+            Err(error) => return Err(error),
+        }
+    }
+    registry.schema_version = 1;
+    Ok(())
+}
+
 struct RegistryLock(File);
 
 impl Drop for RegistryLock {
@@ -200,6 +254,12 @@ impl Drop for RegistryLock {
 
 fn lock(data_dir: &Path) -> Result<RegistryLock> {
     fs::create_dir_all(data_dir).map_err(|e| storage::io_error(data_dir, e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(data_dir, fs::Permissions::from_mode(0o700))
+            .map_err(|e| storage::io_error(data_dir, e))?;
+    }
     let path = data_dir.join("registry.lock");
     let file = OpenOptions::new()
         .create(true)
@@ -344,7 +404,7 @@ fn check(candidate: &Candidate, root: &Path, registry: &Registry) -> Result<Mani
     }
     if let Some(existing) = registry.installations.iter().find(|i| i.path == actual) {
         let current = manifest.launch_sha256();
-        if existing.confirmed_launch_sha256.as_deref() != Some(current.as_str())
+        if !existing.confirmation_matches(manifest)
             && candidate.reviewed_launch_sha256.as_deref() != Some(current.as_str())
         {
             return Err(Error::new("REVIEW_REQUIRED", "Launch declaration changed or lacks prior confirmation; explicitly confirm it with review before import")
@@ -362,10 +422,10 @@ pub fn import(data_dir: &Path, draft: &Draft) -> Result<Vec<Installation>> {
 }
 
 pub fn import_with_receipts(data_dir: &Path, draft: &Draft) -> Result<Vec<ImportReceipt>> {
-    if draft.schema_version != 0 {
+    if draft.schema_version > 1 {
         return Err(Error::new(
             "INVALID_INPUT",
-            "Only draft version 0 is supported",
+            "Only draft versions 0 and 1 are supported",
         ));
     }
     if !draft.root.is_absolute() || storage::directory(&draft.root)? != draft.root {
@@ -382,6 +442,17 @@ pub fn import_with_receipts(data_dir: &Path, draft: &Draft) -> Result<Vec<Import
     let mut registry = load(data_dir)?;
     let mut paths = HashSet::new();
     for candidate in &selected {
+        if draft.schema_version == 0
+            && candidate
+                .manifest
+                .as_ref()
+                .is_some_and(|m| m.schema_version != 0)
+        {
+            return Err(Error::new(
+                "INVALID_INPUT",
+                "Manifest v1 requires draft version 1",
+            ));
+        }
         if !paths.insert(&candidate.path) {
             return Err(Error::new(
                 "INVALID_INPUT",
@@ -400,6 +471,12 @@ pub fn import_with_receipts(data_dir: &Path, draft: &Draft) -> Result<Vec<Import
                 "Selected App roots overlap; confirm grouping before import",
             ));
         }
+    }
+    if selected
+        .iter()
+        .any(|c| c.manifest.as_ref().is_some_and(|m| m.schema_version == 1))
+    {
+        upgrade(data_dir, &mut registry)?;
     }
     let mut completed = Vec::new();
     for candidate in selected {
@@ -444,6 +521,10 @@ pub fn import_with_receipts(data_dir: &Path, draft: &Draft) -> Result<Vec<Import
                 // Explicit import is confirmation for both generated and project-owned manifests.
                 existing.confirmed_launch_sha256 = Some(manifest.launch_sha256());
                 existing.confirmed_services = Some(manifest.services.clone());
+                existing.confirmed_manifest =
+                    (manifest.schema_version == 1).then(|| manifest.clone());
+                existing.confirmed_root =
+                    (registry.schema_version == 1).then(|| existing.path.clone());
                 if let Some(file) = created_files.first() {
                     existing.created_manifest = Some(CreatedManifest {
                         sha256: file.sha256.clone(),
@@ -473,6 +554,8 @@ pub fn import_with_receipts(data_dir: &Path, draft: &Draft) -> Result<Vec<Import
                     }),
                     confirmed_launch_sha256: Some(manifest.launch_sha256()),
                     confirmed_services: Some(manifest.services.clone()),
+                    confirmed_manifest: (manifest.schema_version == 1).then(|| manifest.clone()),
+                    confirmed_root: (registry.schema_version == 1).then(|| candidate.path.clone()),
                 };
                 registry.installations.push(installation.clone());
                 installation
@@ -533,7 +616,7 @@ pub fn list(data_dir: &Path, include_detached: bool) -> Result<Vec<Listing>> {
             let current_launch_sha256 = manifest.as_ref().map(Manifest::launch_sha256);
             let launch_changed = installation.confirmed_launch_sha256.as_ref()
                 .zip(current_launch_sha256.as_ref()).map(|(confirmed, current)| confirmed != current);
-            let requires_launch_confirmation = launch_changed != Some(false);
+            let requires_launch_confirmation = manifest.as_ref().is_none_or(|m| !installation.confirmation_matches(m));
             if requires_launch_confirmation {
                 launch_warnings.push(crate::manifest::Issue::new("launch_confirmation", match launch_changed {
                     Some(true) => "Launch declaration changed after confirmation; review and import again before launch",
@@ -708,6 +791,12 @@ pub fn relink(data_dir: &Path, id: Uuid, path: &Path) -> Result<Installation> {
         }
         _ => {}
     }
+    upgrade(data_dir, &mut registry)?;
+    // Keep the old snapshot for review, but never transfer its execution root.
+    if registry.installations[index].confirmed_root.is_none() {
+        registry.installations[index].confirmed_root =
+            Some(registry.installations[index].path.clone());
+    }
     registry.installations[index].path = target;
     let result = registry.installations[index].clone();
     save(data_dir, &registry)?;
@@ -782,7 +871,7 @@ fn mark_launch_changes(registry: &Registry, draft: &mut Draft) {
             continue;
         };
         let current = manifest.launch_sha256();
-        if previous.confirmed_launch_sha256.as_deref() == Some(current.as_str()) {
+        if previous.confirmation_matches(manifest) {
             continue;
         }
         if candidate.reviewed_launch_sha256.as_deref() != Some(current.as_str()) {
@@ -792,6 +881,29 @@ fn mark_launch_changes(registry: &Registry, draft: &mut Draft) {
             "launch_change",
             "启动声明已变更或缺少历史确认；必须通过 review 明确确认",
         ));
+        if previous
+            .confirmed_root
+            .as_ref()
+            .is_some_and(|p| p != &previous.path)
+        {
+            candidate.notes.push(Issue::new(
+                "launch_change",
+                "执行根目录已改变；旧确认不适用于新目录",
+            ));
+        }
+        if manifest.schema_version == 1 || previous.confirmed_manifest.is_some() {
+            candidate.notes.push(Issue::new(
+                "launch_change",
+                format!(
+                    "入口：旧 {:?}；新 {:?}",
+                    previous
+                        .confirmed_manifest
+                        .as_ref()
+                        .and_then(|m| m.open.as_ref()),
+                    manifest.open
+                ),
+            ));
+        }
         if let Some(services) = &previous.confirmed_services {
             for service in services {
                 candidate.notes.push(Issue::new(
@@ -844,7 +956,7 @@ pub(crate) fn annotate_copies(data_dir: &Path, draft: &mut Draft, remaining: &mu
             match manifest {
                 Some(m)
                     if m.project_id == installation.project_id
-                        && m.schema_version == 0
+                        && m.schema_version <= 1
                         && valid_text(&m.name) =>
                 {
                     names.entry(m.name).or_default().push(installation);

@@ -112,6 +112,8 @@ pub fn review_with_descriptions(
         }
         if !read_only && manifest.services.is_empty() {
             manifest.services.push(Service {
+                startup_timeout_ms: None,
+                stop_timeout_ms: None,
                 name: "app".into(),
                 command: vec![],
                 cwd: ".".into(),
@@ -176,6 +178,10 @@ fn show_declarations(
                 candidate.human_label
             )
             .map_err(|e| Error::new("IO_ERROR", e.to_string()))?;
+        }
+        if manifest.schema_version == 1 {
+            writeln!(output, "  open={:?}", manifest.open)
+                .map_err(|e| Error::new("IO_ERROR", e.to_string()))?;
         }
         for service in &manifest.services {
             writeln!(

@@ -155,6 +155,8 @@ pub(super) fn propose_groups(
                 .unwrap_or_default();
             if services.is_empty() {
                 manifest.services.push(crate::manifest::Service {
+                    startup_timeout_ms: None,
+                    stop_timeout_ms: None,
                     name: directory.clone(),
                     cwd: directory.clone(),
                     command: vec![],
@@ -288,6 +290,8 @@ pub(super) fn propose_nested_groups(
         };
         if manifest.services.is_empty() {
             manifest.services.push(crate::manifest::Service {
+                startup_timeout_ms: None,
+                stop_timeout_ms: None,
                 name: "root".into(),
                 cwd: ".".into(),
                 command: vec![],
@@ -302,6 +306,8 @@ pub(super) fn propose_nested_groups(
         let services = child.manifest.map(|m| m.services).unwrap_or_default();
         if services.is_empty() {
             manifest.services.push(crate::manifest::Service {
+                startup_timeout_ms: None,
+                stop_timeout_ms: None,
                 name: directory.clone(),
                 cwd: directory.clone(),
                 command: vec![],

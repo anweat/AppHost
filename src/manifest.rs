@@ -16,7 +16,28 @@ pub struct Manifest {
     pub name: String,
     #[serde(default)]
     pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open: Option<Open>,
     pub services: Vec<Service>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Open {
+    pub service: String,
+    #[serde(default = "default_open_path")]
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OpenTarget {
+    pub service: String,
+    pub port: u16,
+    pub path: String,
+}
+
+fn default_open_path() -> String {
+    "/".into()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,9 +51,21 @@ pub struct Service {
     pub port: Option<u16>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_timeout_ms: Option<u64>,
 }
 
 impl Service {
+    pub fn startup_timeout_ms(&self) -> u64 {
+        self.startup_timeout_ms.unwrap_or(30_000)
+    }
+
+    pub fn stop_timeout_ms(&self) -> u64 {
+        self.stop_timeout_ms.unwrap_or(5_000)
+    }
+
     /// Human-readable argv, not a shell command to execute. Quote ambiguous arguments.
     pub fn launch_summary(&self) -> String {
         let command = self
@@ -62,6 +95,12 @@ impl Service {
         );
         if let Some(port) = self.port {
             result.push_str(&format!("  port={port}"));
+        }
+        if let Some(timeout) = self.startup_timeout_ms {
+            result.push_str(&format!("  startup_timeout_ms={timeout}"));
+        }
+        if let Some(timeout) = self.stop_timeout_ms {
+            result.push_str(&format!("  stop_timeout_ms={timeout}"));
         }
         if !self.env.is_empty() {
             result.push_str(&format!("  env={:?}", self.env));
@@ -126,12 +165,29 @@ impl Manifest {
     /// This does not attest to executable/script contents, installed dependencies or PATH changes.
     pub fn launch_sha256(&self) -> String {
         use sha2::{Digest, Sha256};
-        let bytes = serde_json::to_vec(&(
-            "apphost.launch.v1",
-            self.schema_version,
-            self.project_id,
-            &self.services,
-        ))
+        // Keep the v0 byte representation exact: historical confirmations predate
+        // open/timeout fields. Only v1 normalizes omitted execution defaults.
+        let bytes = if self.schema_version == 1 {
+            let mut services = self.services.clone();
+            for service in &mut services {
+                service.startup_timeout_ms = Some(service.startup_timeout_ms());
+                service.stop_timeout_ms = Some(service.stop_timeout_ms());
+            }
+            serde_json::to_vec(&(
+                "apphost.launch.v2",
+                self.schema_version,
+                self.project_id,
+                services,
+                &self.open,
+            ))
+        } else {
+            serde_json::to_vec(&(
+                "apphost.launch.v1",
+                self.schema_version,
+                self.project_id,
+                &self.services,
+            ))
+        }
         .expect("Launch declarations contain only JSON-serializable values");
         format!("{:x}", Sha256::digest(bytes))
     }
@@ -177,8 +233,19 @@ impl Manifest {
 
     pub fn validate(&self, root: &Path) -> Vec<Issue> {
         let mut issues = Vec::new();
-        if self.schema_version != 0 {
-            issues.push(Issue::new("schema_version", "Only version 0 is supported"));
+        if self.schema_version > 1 {
+            issues.push(Issue::new(
+                "schema_version",
+                "Only versions 0 and 1 are supported",
+            ));
+        }
+        if self.schema_version == 0 && self.open.is_some() {
+            issues.push(Issue::new("open", "open requires schema_version 1"));
+        }
+        if self.open.is_some()
+            && let Err(error) = self.open_target()
+        {
+            issues.push(Issue::new("open", error.message));
         }
         if self.project_id.is_nil() {
             issues.push(Issue::new("project_id", "UUID must not be nil"));
@@ -198,6 +265,24 @@ impl Manifest {
         let mut names = HashSet::new();
         for (i, service) in self.services.iter().enumerate() {
             let field = |name: &str| format!("services[{i}].{name}");
+            for (key, value, maximum) in [
+                ("startup_timeout_ms", service.startup_timeout_ms, 600_000),
+                ("stop_timeout_ms", service.stop_timeout_ms, 60_000),
+            ] {
+                if let Some(value) = value {
+                    if self.schema_version == 0 {
+                        issues.push(Issue::new(
+                            field(key),
+                            "Timeout fields require schema_version 1",
+                        ));
+                    } else if !(1_000..=maximum).contains(&value) {
+                        issues.push(Issue::new(
+                            field(key),
+                            format!("Expected 1000..={maximum} milliseconds"),
+                        ));
+                    }
+                }
+            }
             if !valid_text(&service.name) || !names.insert(&service.name) {
                 issues.push(Issue::new(
                     field("name"),
@@ -233,5 +318,50 @@ impl Manifest {
             }
         }
         issues
+    }
+
+    /// Resolve a validated declaration, without probing ports or waking anything.
+    pub fn open_target(&self) -> Result<Option<OpenTarget>> {
+        let (service, path) = if let Some(open) = &self.open {
+            if !open.path.starts_with('/')
+                || open.path.starts_with("//")
+                || open.path.contains(['\\', '?', '#'])
+                || open.path.chars().any(char::is_control)
+            {
+                return Err(Error::new(
+                    "VALIDATION_ERROR",
+                    "open.path must be a local path starting with one slash, without query or fragment",
+                ));
+            }
+            let matches: Vec<_> = self
+                .services
+                .iter()
+                .filter(|s| s.name == open.service)
+                .collect();
+            if matches.len() != 1 || matches[0].port.is_none_or(|p| p == 0) {
+                return Err(Error::new(
+                    "VALIDATION_ERROR",
+                    "open.service must reference exactly one service with a declared port",
+                ));
+            }
+            (matches[0], open.path.clone())
+        } else {
+            let mut services = self.services.iter().filter(|s| s.port.is_some());
+            let Some(service) = services.next() else {
+                return Ok(None);
+            };
+            if services.next().is_some() {
+                return Err(Error::new(
+                    "OPEN_TARGET_REQUIRED",
+                    "Multiple services declare ports; select open.service explicitly",
+                ));
+            }
+            (service, "/".into())
+        };
+        Ok(Some(OpenTarget {
+            service: service.name.clone(),
+            port: service.port.unwrap(),
+            path,
+        }))
     }
 }

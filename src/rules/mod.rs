@@ -48,6 +48,8 @@ fn proposal(
         description,
         requires_confirmation,
         services: vec![Service {
+            startup_timeout_ms: None,
+            stop_timeout_ms: None,
             name: "app".into(),
             command,
             cwd: ".".into(),

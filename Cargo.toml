@@ -16,4 +16,5 @@ sha2 = "0.10"
 fs2 = "0.4"
 
 [dev-dependencies]
+libc = "0.2"
 base64 = "0.22"

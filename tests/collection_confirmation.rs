@@ -130,6 +130,8 @@ fn runnable_grandchild_also_prevents_a_collection_from_becoming_one_app() {
 }
 fn draft_service() -> Vec<manifest::Service> {
     vec![manifest::Service {
+        startup_timeout_ms: None,
+        stop_timeout_ms: None,
         name: "app".into(),
         cwd: ".".into(),
         command: vec!["server".into()],

@@ -400,6 +400,14 @@ fn scan_internal(
     if let Some(data_dir) = data_dir {
         crate::registry::annotate_copies(data_dir, &mut draft, &mut remaining);
     }
+    // Existing v1 declarations need a v1 draft; inferred declarations remain v0.
+    if draft
+        .candidates
+        .iter()
+        .any(|c| c.manifest.as_ref().is_some_and(|m| m.schema_version == 1))
+    {
+        draft.schema_version = 1;
+    }
     draft.candidates.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(draft)
 }
@@ -508,6 +516,7 @@ fn candidate(
         }
     }
     let mut manifest = Manifest {
+        open: None,
         schema_version: 0,
         project_id: Uuid::new_v4(),
         name: fallback,

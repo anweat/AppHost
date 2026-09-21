@@ -1,6 +1,7 @@
 pub mod discovery;
 mod git_metadata;
 mod launch;
+pub mod logs;
 pub mod manifest;
 pub mod registry;
 pub mod review;

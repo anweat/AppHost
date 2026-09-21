@@ -35,6 +35,8 @@ impl DiscoveryRule for CustomRule {
             description: "Community rule example".into(),
             requires_confirmation: false,
             services: vec![Service {
+                startup_timeout_ms: None,
+                stop_timeout_ms: None,
                 name: "server".into(),
                 command: if self.invalid_command {
                     vec![]
@@ -359,11 +361,14 @@ fn authoritative_manifest_does_not_expand_nested_hints_or_rules() {
     let temp = TempDir::new().unwrap();
     node(&temp.path().join("nested"));
     let m = Manifest {
+        open: None,
         schema_version: 0,
         project_id: Uuid::new_v4(),
         name: "explicit".into(),
         description: String::new(),
         services: vec![Service {
+            startup_timeout_ms: None,
+            stop_timeout_ms: None,
             name: "app".into(),
             command: vec!["server".into()],
             cwd: ".".into(),
