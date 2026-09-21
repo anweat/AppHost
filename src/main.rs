@@ -7,7 +7,7 @@ use uuid::Uuid;
 #[derive(Parser)]
 #[command(
     version,
-    about = "AppHost M0: inspect manifests and register local apps; never runs project commands"
+    about = "AppHost: inspect and register local apps; explicitly configure their runtime environment"
 )]
 struct Cli {
     /// AppHost-owned registry directory (also APPHOST_DATA_DIR).
@@ -105,6 +105,13 @@ enum Command {
 
 #[derive(Subcommand)]
 enum EnvironmentCommand {
+    /// Explicitly run a login shell to capture PATH. This executes shell startup scripts.
+    Capture {
+        #[arg(long)]
+        shell: PathBuf,
+        #[arg(long, required = true)]
+        yes: bool,
+    },
     /// Show the saved PATH or the system default without creating files.
     Show,
     /// Save an absolute PATH list for future runtime launches.
@@ -148,6 +155,9 @@ fn run(cli: Cli) -> Result<Option<Value>> {
         Command::Environment { command } => {
             let directory = data_dir(cli.data_dir)?;
             match command {
+                EnvironmentCommand::Capture { shell, yes: _ } => Ok(json!(
+                    apphost::environment::capture_path(&directory, &shell)?
+                )),
                 EnvironmentCommand::Show => Ok(json!(apphost::environment::load(&directory)?)),
                 EnvironmentCommand::SetPath { path } => {
                     Ok(json!(apphost::environment::save_path(&directory, path)?))

@@ -65,7 +65,7 @@ ImportDraft v0 仅允许 v0 声明，保持原写入语义；包含 v1 清单时
 
 ## 运行环境基线
 
-macOS 默认 PATH 为 `/usr/bin:/bin:/usr/sbin:/sbin`。共享配置保存在当前 data-dir 的 `environment.json`，格式为 `{schema_version:1,path:字符串}`；缺少文件时只读返回默认值，不创建配置。只接受已知版本和字段；损坏配置明确报错，不能静默退回系统 PATH。
+macOS 默认 PATH 为 `/usr/bin:/bin:/usr/sbin:/sbin`。共享配置保存在当前 data-dir 的 `environment.json`，格式为 `{schema_version:1,path:字符串,capture?:{shell:绝对路径,captured_at_ms:时间}}`；缺少文件时只读返回默认值，不创建配置。只接受已知版本和字段；损坏配置明确报错，不能静默退回系统 PATH。手动保存会移除旧的采集来源信息。
 
 手动保存的 PATH 必须是非空绝对目录列表，最多 256 项、合计 16 KiB，拒绝空项和控制字符；保留顺序，不展开 `~`、变量或 shell 表达式，不要求目录当前存在。写入先校验，再使用独立短锁和原子发布；不在环境锁内取得登记锁或启动进程。
 
@@ -74,6 +74,8 @@ macOS 默认 PATH 为 `/usr/bin:/bin:/usr/sbin:/sbin`。共享配置保存在当
 命令仍为参数数组，使用最终 PATH 解析为明确的可执行路径；带路径的命令相对于服务 cwd。准备阶段不执行程序或 `--version`，找不到可执行文件返回 INVALID_COMMAND。准备结果不授予启动权限，运行层仍须完成登记确认与 spawn 前复核；配置改变只影响后续准备的启动。
 
 CLI：`environment show` 只读显示 PATH；`environment set-path <PATH>` 显式保存；`environment check <项目或清单>` 用同一环境准备器显示服务 cwd 与可执行路径，不运行服务、不显示 env 值。M0 的静态发现提示保留兼容行为，不能作为 M1 启动预检的替代。
+
+`environment capture --shell <绝对路径> --yes` 是主动执行入口：要求所选 shell 支持 `-l -c` 和 POSIX printf/变量语法，执行登录启动脚本后提取 PATH。采集使用同一受控环境，独立进程组、5 秒期限及 stdout/stderr 合计 64 KiB 上限；用本次随机标记分离启动脚本的混杂输出，不输出原始 stdout/stderr。采集结束清理能够证明归属的剩余进程，归属不确定则报错，不重试。取得有效 PATH 后才持环境锁保存；如果采集期间配置改变则返回 CONFLICT，不覆盖较新的配置。超时、超量、非零退出和无效结果均保留原配置。扫描、show、check 和 daemon 启动不调用这个入口。
 
 ## 日志采集边界
 

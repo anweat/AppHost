@@ -10,6 +10,8 @@ use std::{
 };
 
 #[cfg(target_os = "macos")]
+mod capture;
+#[cfg(target_os = "macos")]
 mod macos;
 
 pub const SYSTEM_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
@@ -20,6 +22,15 @@ const FILE_NAME: &str = "environment.json";
 pub struct Baseline {
     pub schema_version: u32,
     pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture: Option<CaptureRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureRecord {
+    pub shell: PathBuf,
+    pub captured_at_ms: u64,
 }
 
 fn supported() -> Result<()> {
@@ -38,12 +49,21 @@ impl Baseline {
         Ok(Self {
             schema_version: 1,
             path: SYSTEM_PATH.into(),
+            capture: None,
         })
     }
 
     pub fn validate(&self) -> Result<()> {
         supported()?;
         if self.schema_version != 1
+            || self.capture.as_ref().is_some_and(|record| {
+                !record.shell.is_absolute()
+                    || record
+                        .shell
+                        .to_str()
+                        .is_none_or(|path| path.len() > 4096 || path.chars().any(char::is_control))
+                    || record.captured_at_ms == 0
+            })
             || self.path.is_empty()
             || self.path.len() > 16 * 1024
             || self.path.chars().any(char::is_control)
@@ -87,7 +107,14 @@ pub fn save_path(data_dir: &Path, path: String) -> Result<Baseline> {
     let baseline = Baseline {
         schema_version: 1,
         path,
+        capture: None,
     };
+    save(data_dir, baseline, None)
+}
+
+// Some(None) means the caller observed no file; None skips optimistic comparison
+// for an explicit manual set. The long shell operation never holds this lock.
+fn save(data_dir: &Path, baseline: Baseline, expected: Option<Option<String>>) -> Result<Baseline> {
     baseline.validate()?;
     fs::create_dir_all(data_dir).map_err(|e| storage::io_error(data_dir, e))?;
     #[cfg(unix)]
@@ -114,10 +141,34 @@ pub fn save_path(data_dir: &Path, path: String) -> Result<Baseline> {
     let _lock = Lock(file);
     // Do not overwrite an unknown/newer format or hide corrupted user settings.
     load(data_dir)?;
+    if let Some(expected) = expected
+        && storage::fingerprint(&data_dir.join(FILE_NAME))? != expected
+    {
+        return Err(Error::new(
+            "CONFLICT",
+            "Environment changed during capture; current settings were preserved",
+        ));
+    }
     let bytes = serde_json::to_vec_pretty(&baseline)
         .map_err(|e| Error::new("ENVIRONMENT_INVALID", e.to_string()))?;
     storage::publish(&data_dir.join(FILE_NAME), &bytes, true)?;
     Ok(baseline)
+}
+
+pub fn capture_path(data_dir: &Path, shell: &Path) -> Result<Baseline> {
+    supported()?;
+    #[cfg(target_os = "macos")]
+    {
+        capture::capture_path(data_dir, shell)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (data_dir, shell);
+        Err(Error::new(
+            "UNSUPPORTED_PLATFORM",
+            "PATH capture requires macOS",
+        ))
+    }
 }
 
 #[derive(Serialize)]

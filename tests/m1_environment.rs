@@ -146,6 +146,7 @@ fn explicit_paths_preserve_symlinks_and_arguments_without_shell_interpretation()
         &Baseline {
             schema_version: 1,
             path: "/does-not-exist".into(),
+            capture: None,
         },
     )
     .unwrap();
