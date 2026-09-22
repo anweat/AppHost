@@ -170,3 +170,15 @@ fn invalid_grace_does_not_signal_and_finished_child_cannot_be_recaptured() {
         "MANAGEMENT_UNCERTAIN"
     );
 }
+
+#[test]
+fn port_owner_lookup_identifies_a_listener_without_claiming_an_exhaustive_scan() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let owner = apphost::process::port_owners(listener.local_addr().unwrap().port());
+    assert_eq!(owner["found"], true, "{owner}");
+    assert_eq!(owner["incomplete"], false, "{owner}");
+    assert_eq!(owner["scope"], "first_match");
+    assert_eq!(owner["owners"][0]["pid"], std::process::id());
+    assert_eq!(owner["owners"].as_array().unwrap().len(), 1);
+    assert!(owner["limitations"]["permission_denied"].is_u64());
+}

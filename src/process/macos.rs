@@ -383,12 +383,10 @@ fn owns_listener(members: &[Identity], port: u16, family: i32) -> Result<bool> {
     Ok(false)
 }
 
-/// Best-effort evidence for a failed bind, never authority to signal. Inspection
-/// is capped both by PID count and elapsed time; omitted owners stay explicit.
+/// Find one representative owner for display, never authority to signal.
+/// `incomplete` describes an unsuccessful lookup, not an exhaustive owner list.
 pub fn port_owners(port: u16) -> serde_json::Value {
-    unsafe extern "C" {
-        fn apphost_pid_listens(pid: i32, port: u16, family: i32) -> i32;
-    }
+    let end = Instant::now() + Duration::from_millis(250);
     let mut pids = vec![0i32; 65536];
     let count = unsafe {
         libc::proc_listallpids(
@@ -396,31 +394,52 @@ pub fn port_owners(port: u16) -> serde_json::Value {
             (pids.len() * mem::size_of::<i32>()) as i32,
         )
     };
-    if count <= 0 || count as usize >= pids.len() {
-        return serde_json::json!({"owners":[],"incomplete":true});
+    if count <= 0 {
+        return serde_json::json!({"scope":"first_match","found":false,"owners":[],"incomplete":true,
+            "limitations":{"pid_list_failed":true,"permission_denied":0,"unavailable":0,"timed_out":false,"pid_limit":false}});
     }
+    let limited = count as usize >= pids.len();
+    pids.truncate((count as usize).min(pids.len()));
+    lookup_port_owner(port, pids, end, limited)
+}
+fn lookup_port_owner(
+    port: u16,
+    mut pids: Vec<i32>,
+    end: Instant,
+    limited: bool,
+) -> serde_json::Value {
+    unsafe extern "C" {
+        fn apphost_pid_listens(pid: i32, port: u16, family: i32) -> i32;
+    }
+    // Prefer newer PID values as a search heuristic only, never as identity proof.
+    pids.sort_unstable_by(|a, b| b.cmp(a));
     let mut owners = Vec::new();
-    let mut incomplete = false;
-    let end = Instant::now() + Duration::from_millis(250);
-    for pid in pids.into_iter().take(count as usize) {
-        if Instant::now() >= end || owners.len() >= 16 {
-            incomplete = true;
+    let (mut permission_denied, mut unavailable, mut timed_out) = (0, 0, false);
+    for pid in pids {
+        if Instant::now() >= end {
+            timed_out = true;
             break;
         }
         if pid <= 0 {
             continue;
         }
-        let result = [libc::AF_INET, libc::AF_INET6]
-            .map(|family| unsafe { apphost_pid_listens(pid, port, family) });
-        if result.contains(&1) {
-            let mut name = [0u8; 256];
-            let n = unsafe { libc::proc_name(pid, name.as_mut_ptr().cast(), name.len() as u32) };
-            owners.push(serde_json::json!({"pid":pid,"name":if n>0 {Some(String::from_utf8_lossy(&name[..(n as usize).min(name.len())]).trim_end_matches('\0').to_string())}else{None}}));
-        } else if result.contains(&-1) {
-            incomplete = true;
+        match unsafe { apphost_pid_listens(pid, port, 0) } {
+            1 => {
+                let mut name = [0u8; 256];
+                let n =
+                    unsafe { libc::proc_name(pid, name.as_mut_ptr().cast(), name.len() as u32) };
+                owners.push(serde_json::json!({"pid":pid,"name":if n>0 {Some(String::from_utf8_lossy(&name[..(n as usize).min(name.len())]).trim_end_matches('\0').to_string())}else{None}}));
+                break;
+            }
+            -2 => permission_denied += 1,
+            -1 => unavailable += 1,
+            _ => {}
         }
     }
-    serde_json::json!({"owners":owners,"incomplete":incomplete})
+    let found = !owners.is_empty();
+    serde_json::json!({"scope":"first_match","found":found,"owners":owners,
+        "incomplete":!found && (timed_out || limited || permission_denied > 0 || unavailable > 0),
+        "limitations":{"pid_list_failed":false,"permission_denied":permission_denied,"unavailable":unavailable,"timed_out":timed_out,"pid_limit":limited}})
 }
 
 #[cfg(test)]
@@ -485,5 +504,30 @@ mod tests {
             "MANAGEMENT_UNCERTAIN"
         );
         assert!(fixture.child.try_wait().unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod owner_tests {
+    use super::*;
+    #[test]
+    fn expired_owner_search_is_not_reported_as_a_complete_absence() {
+        let result = lookup_port_owner(
+            12345,
+            vec![std::process::id() as i32],
+            Instant::now(),
+            false,
+        );
+        assert_eq!(result["found"], false);
+        assert_eq!(result["incomplete"], true);
+        assert_eq!(result["limitations"]["timed_out"], true);
+        let empty = lookup_port_owner(
+            12345,
+            vec![],
+            Instant::now() + Duration::from_secs(1),
+            false,
+        );
+        assert_eq!(empty["found"], false);
+        assert_eq!(empty["incomplete"], false);
     }
 }
