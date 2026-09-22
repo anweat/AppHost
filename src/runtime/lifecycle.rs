@@ -161,17 +161,22 @@ fn load_records(data: &Path) -> Result<Vec<Record>> {
         Err(e) => return Err(storage::io_error(&root, e)),
     };
     let mut records = Vec::new();
+    let mut ignored = 0;
     for (count, e) in entries.enumerate() {
         if count >= 4096 {
             return Err(invalid("Too many runtime directory entries"));
         }
         let e = e.map_err(|e| storage::io_error(&root, e))?;
-        // A daemon killed between fsync and rename can leave an unpublished
-        // temporary file. It is never a runtime authority or a corrupt record.
-        if e.file_name()
-            .to_string_lossy()
-            .starts_with(".apphost-publish-")
-        {
+        // Only canonical installation filenames carry runtime authority. Never
+        // interpret Finder metadata or unrelated user files as snapshots.
+        let name = e.file_name();
+        let valid = name
+            .to_str()
+            .and_then(|name| name.strip_suffix(".json"))
+            .and_then(|id| Uuid::parse_str(id).ok())
+            .is_some_and(|id| name == format!("{id}.json").as_str());
+        if !valid {
+            ignored += 1;
             continue;
         }
         let r: Record = serde_json::from_slice(&storage::read(&e.path())?).map_err(|error| {
@@ -196,6 +201,12 @@ fn load_records(data: &Path) -> Result<Vec<Record>> {
             ));
         }
         records.push(r);
+    }
+    if ignored > 0 {
+        eprintln!(
+            "AppHost: ignored {ignored} unrelated entries in {}",
+            root.display()
+        );
     }
     if records.len() > MAX_RECORDS {
         return Err(invalid("Too many runtime records"));

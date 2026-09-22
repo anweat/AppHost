@@ -768,3 +768,53 @@ fn hot_reload_has_ten_second_grace_and_running_checks_do_not_connect() {
     wait(|| f.state(id)["services"][0]["ready"] == true);
     assert_eq!(f.state(id)["status"]["state"], "FAILED");
 }
+
+#[test]
+fn finder_and_unrelated_entries_do_not_break_runtime_or_logs() {
+    let mut f = Fixture::new();
+    let id = f.register(json!({}), None, false);
+    f.boot();
+    f.crash();
+    fs::create_dir_all(f.data.join("instances")).unwrap();
+    for root in [f.data.join("runtime"), f.data.join("instances")] {
+        for name in [".DS_Store", "notes.txt", "bad.json"] {
+            fs::write(root.join(name), b"not an apphost record").unwrap();
+        }
+    }
+    f.boot();
+    f.rpc("start", json!({"installation_id":id}));
+    let running = f.until(id, "RUNNING");
+    let instance = running["instance_id"].as_str().unwrap();
+    let logs = f.data.join("instances").join(instance).join("logs");
+    for name in [".DS_Store", "notes.txt", "01"] {
+        fs::write(logs.join(name), b"unrelated").unwrap();
+    }
+    let result = f.rpc("logs", json!({"installation_id":id,"instance_id":instance,"from_ms":0,"to_ms":u64::MAX,"limit":4096}));
+    assert!(!result["window"]["chunks"].as_array().unwrap().is_empty());
+    f.rpc("restart", json!({"installation_id":id}));
+    f.until(id, "RUNNING");
+    assert!(f.data.join("runtime/.DS_Store").exists());
+    // A correctly named but corrupt authority must still fail closed.
+    f.crash();
+    fs::write(
+        f.data
+            .join("runtime")
+            .join(format!("{}.json", Uuid::new_v4())),
+        b"bad record",
+    )
+    .unwrap();
+    assert_eq!(
+        apphost::runtime::lifecycle::history(&f.data, None)
+            .unwrap_err()
+            .code,
+        "RUNTIME_INVALID"
+    );
+    // Remove only the injected corrupt authority, then recover for fixture cleanup.
+    for entry in fs::read_dir(f.data.join("runtime")).unwrap() {
+        let entry = entry.unwrap();
+        if fs::read(entry.path()).is_ok_and(|b| b == b"bad record") {
+            fs::remove_file(entry.path()).unwrap();
+        }
+    }
+    f.boot();
+}

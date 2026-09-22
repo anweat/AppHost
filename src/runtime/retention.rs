@@ -64,12 +64,21 @@ pub(super) fn prune(data: &Path, id: Uuid, active: Uuid) -> Result<()> {
         .as_millis();
     let mut archives: Vec<(u128, u64, PathBuf)> = Vec::new();
     let mut files = 0;
+    let mut ignored = 0;
     for (count, e) in entries.enumerate() {
         if count >= 4096 {
             return Err(Error::new("RUNTIME_LIMIT", "Too many instance directories"));
         }
         let e = e.map_err(|e| storage::io_error(&root, e))?;
-        let instance = Uuid::parse_str(&e.file_name().to_string_lossy()).map_err(|_| invalid())?;
+        let name = e.file_name();
+        let instance = name
+            .to_str()
+            .and_then(|name| Uuid::parse_str(name).ok())
+            .filter(|id| name == id.to_string().as_str());
+        let Some(instance) = instance else {
+            ignored += 1;
+            continue;
+        };
         if instance == active {
             continue;
         }
@@ -103,6 +112,12 @@ pub(super) fn prune(data: &Path, id: Uuid, active: Uuid) -> Result<()> {
             size(&e.path(), 0, &mut files)?,
             e.path(),
         ));
+    }
+    if ignored > 0 {
+        eprintln!(
+            "AppHost: ignored {ignored} unrelated entries in {}",
+            root.display()
+        );
     }
     archives.sort_by_key(|entry| entry.0);
     let mut bytes: u64 = archives.iter().map(|a| a.1).sum();

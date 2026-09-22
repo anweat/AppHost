@@ -65,19 +65,32 @@ pub fn read_window(
         ));
     }
     let mut segments = Vec::new();
-    for entry in fs::read_dir(root)?.take(101) {
+    let mut ignored = 0;
+    for (count, entry) in fs::read_dir(root)?.enumerate() {
+        if count >= 4096 {
+            return Err(invalid("Too many log directory entries"));
+        }
         let entry = entry?;
         let name = entry.file_name();
-        let name = name
+        let number = name
             .to_str()
-            .ok_or_else(|| invalid("Invalid segment name"))?;
-        let number: u64 = name
-            .parse()
-            .map_err(|_| invalid("Invalid segment number"))?;
-        if number.to_string() != name || !entry.file_type()?.is_dir() {
+            .and_then(|name| name.parse::<u64>().ok())
+            .filter(|number| name == number.to_string().as_str());
+        let Some(number) = number else {
+            ignored += 1;
+            continue;
+        };
+        // A valid segment name still requires a real directory and valid contents.
+        if !entry.file_type()?.is_dir() {
             return Err(invalid("Invalid segment directory"));
         }
         segments.push(number);
+    }
+    if ignored > 0 {
+        eprintln!(
+            "AppHost: ignored {ignored} unrelated entries in {}",
+            root.display()
+        );
     }
     if segments.len() > 100 {
         return Err(invalid("Too many log segments"));
