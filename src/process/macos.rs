@@ -335,11 +335,14 @@ impl Group {
         self.refresh()
     }
 
+    /// Passive running observation using the identities just refreshed by the worker.
+    pub(crate) fn port_listening(members: &[Identity], port: u16) -> Result<bool> {
+        Ok(owns_listener(members, port, libc::AF_INET)?
+            || owns_listener(members, port, libc::AF_INET6)?)
+    }
+
     pub fn port_ready(&mut self, port: u16) -> Result<bool> {
         use std::net::{SocketAddr, TcpStream};
-        unsafe extern "C" {
-            fn apphost_pid_listens(pid: i32, port: u16, family: i32) -> i32;
-        }
         let members = self.refresh()?;
         for (host, family) in [("127.0.0.1", libc::AF_INET), ("::1", libc::AF_INET6)] {
             let address: SocketAddr = format!(
@@ -356,18 +359,28 @@ impl Group {
             if TcpStream::connect_timeout(&address, Duration::from_millis(30)).is_err() {
                 continue;
             }
-            for member in &members {
-                let found = unsafe { apphost_pid_listens(member.pid as i32, port, family) };
-                if found < 0 {
-                    return Err(uncertain("Cannot inspect listening socket owner"));
-                }
-                if found == 1 && identity(member.pid)?.as_ref() == Some(member) {
-                    return Ok(true);
-                }
+            if owns_listener(&members, port, family)? {
+                return Ok(true);
             }
         }
         Ok(false)
     }
+}
+
+fn owns_listener(members: &[Identity], port: u16, family: i32) -> Result<bool> {
+    unsafe extern "C" {
+        fn apphost_pid_listens(pid: i32, port: u16, family: i32) -> i32;
+    }
+    for member in members {
+        let found = unsafe { apphost_pid_listens(member.pid as i32, port, family) };
+        if found < 0 {
+            return Err(uncertain("Cannot inspect listening socket owner"));
+        }
+        if found == 1 && identity(member.pid)?.as_ref() == Some(member) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Best-effort evidence for a failed bind, never authority to signal. Inspection

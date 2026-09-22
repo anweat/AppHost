@@ -22,7 +22,7 @@ fn service_fixture() {
             libc::signal(libc::SIGTERM, libc::SIG_IGN);
         }
     }
-    let _listener = std::env::var("FIXTURE_PORT")
+    let mut listener = std::env::var("FIXTURE_PORT")
         .ok()
         .map(|p| TcpListener::bind(format!("127.0.0.1:{p}")).unwrap());
     let until = std::env::var("FIXTURE_EXIT_MS")
@@ -35,8 +35,33 @@ fn service_fixture() {
             libc::close(2);
         }
     }
+    if let Some(listener) = &listener {
+        listener.set_nonblocking(true).unwrap();
+    }
+    let reload = std::env::var_os("FIXTURE_RELOAD").map(PathBuf::from);
+    let connections = std::env::var_os("FIXTURE_CONNECTIONS").map(PathBuf::from);
+    let mut accepted = 0;
     let start = Instant::now();
     while start.elapsed() < Duration::from_millis(until) {
+        if let Some(reload) = &reload {
+            if reload.exists() {
+                listener = None;
+            } else if listener.is_none() {
+                let port = std::env::var("FIXTURE_PORT").unwrap();
+                let socket = TcpListener::bind(format!("127.0.0.1:{port}")).unwrap();
+                socket.set_nonblocking(true).unwrap();
+                listener = Some(socket);
+            }
+        }
+        if let Some(listener) = &listener {
+            while let Ok((stream, _)) = listener.accept() {
+                drop(stream);
+                accepted += 1;
+            }
+        }
+        if let Some(path) = &connections {
+            fs::write(path, accepted.to_string()).unwrap();
+        }
         let _ = std::io::stdout().write_all(b"output\x00\xff\n");
         let _ = std::io::stderr().write_all(b"error\n");
         thread::sleep(Duration::from_millis(50));
@@ -706,4 +731,40 @@ fn start_waits_for_external_registry_writer() {
     thread::sleep(Duration::from_millis(350));
     FileExt::unlock(&lock).unwrap();
     f.until(id, "RUNNING");
+}
+
+#[test]
+fn hot_reload_has_ten_second_grace_and_running_checks_do_not_connect() {
+    let mut f = Fixture::new();
+    let port = free_port();
+    let reload = f.temp.path().join("reload");
+    let connections = f.temp.path().join("connections");
+    let id = f.register(json!({"FIXTURE_PORT":port.to_string(),"FIXTURE_RELOAD":reload,"FIXTURE_CONNECTIONS":connections}), Some(port), false);
+    f.boot();
+    f.rpc("start", json!({"installation_id":id}));
+    f.until(id, "RUNNING");
+    thread::sleep(Duration::from_millis(200));
+    let before = fs::read_to_string(&connections).unwrap();
+    thread::sleep(Duration::from_millis(2200));
+    assert_eq!(
+        fs::read_to_string(&connections).unwrap(),
+        before,
+        "running probes must not open TCP connections"
+    );
+    fs::write(&reload, "close listener").unwrap();
+    wait(|| f.state(id)["services"][0]["ready"] == false);
+    thread::sleep(Duration::from_millis(1200));
+    assert_eq!(f.state(id)["status"]["state"], "RUNNING");
+    fs::remove_file(&reload).unwrap();
+    wait(|| f.state(id)["services"][0]["ready"] == true);
+    assert_eq!(f.state(id)["status"]["state"], "RUNNING");
+    // A new loss gets its own complete grace period; elapsed downtime does not accumulate.
+    fs::write(&reload, "close again").unwrap();
+    let lost = Instant::now();
+    let failed = f.until(id, "FAILED");
+    assert!(lost.elapsed() >= Duration::from_secs(10));
+    assert_eq!(failed["status"]["failure"], "PORT_NOT_READY");
+    fs::remove_file(&reload).unwrap();
+    wait(|| f.state(id)["services"][0]["ready"] == true);
+    assert_eq!(f.state(id)["status"]["state"], "FAILED");
 }

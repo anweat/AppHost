@@ -235,7 +235,8 @@ pub(super) fn run(
     live: &mut Live,
 ) -> Result<()> {
     let mut started = Instant::now();
-    let mut misses = [0u8; 32];
+    let mut misses: [Option<Instant>; 32] = [None; 32];
+    let mut next_observation = Instant::now();
     loop {
         if let Some(prepared) = plan.take()
             && h.control.load(Ordering::Acquire) == 0
@@ -327,12 +328,19 @@ pub(super) fn run(
                 *live = Live::empty();
                 plan = Some(prepared);
                 started = Instant::now();
-                misses.fill(0);
+                misses.fill(None);
+                next_observation = Instant::now();
                 continue;
             }
             if stopped || !live.any() {
                 return Ok(());
             }
+        }
+        // Keep control latency short without scanning process FDs or serializing
+        // records ten times a second once startup has finished.
+        if Instant::now() < next_observation {
+            thread::sleep(Duration::from_millis(100));
+            continue;
         }
         let before = encode(&*h.record.lock().unwrap())?;
         let mut all_ready = true;
@@ -359,11 +367,19 @@ pub(super) fn run(
                 use std::os::unix::process::ExitStatusExt;
                 exit = Some(json!({"code":status.code(),"signal":status.signal()}));
             }
-            let port = h.record.lock().unwrap().services[i].port;
+            let (port, starting) = {
+                let r = h.record.lock().unwrap();
+                (r.services[i].port, r.status.state() == State::Starting)
+            };
             let ready = if members.is_empty() {
                 false
             } else if let Some(port) = port {
-                match group.port_ready(port) {
+                let observed = if starting {
+                    group.port_ready(port)
+                } else {
+                    Group::port_listening(&members, port)
+                };
+                match observed {
                     Ok(v) => v,
                     Err(e) => {
                         let mut r = h.record.lock().unwrap();
@@ -378,9 +394,9 @@ pub(super) fn run(
             let mut r = h.record.lock().unwrap();
             let was_running = r.status.state() == State::Running;
             if ready {
-                *miss = 0;
-            } else {
-                *miss = miss.saturating_add(1);
+                *miss = None;
+            } else if was_running {
+                miss.get_or_insert_with(Instant::now);
             }
             r.services[i].alive = !members.is_empty();
             r.services[i].ready = ready;
@@ -401,9 +417,11 @@ pub(super) fn run(
             }
             if !ready {
                 all_ready = false;
-                if was_running && *miss >= 3 {
+                if was_running
+                    && miss.is_some_and(|since| since.elapsed() >= Duration::from_secs(10))
+                {
                     r.status.fail("PORT_NOT_READY");
-                } else if !was_running
+                } else if r.status.state() == State::Starting
                     && started.elapsed() >= Duration::from_millis(r.services[i].startup_timeout_ms)
                 {
                     r.status.fail("READINESS_TIMEOUT");
@@ -456,6 +474,11 @@ pub(super) fn run(
         if !live.any() {
             return Ok(());
         }
-        thread::sleep(Duration::from_millis(100));
+        let interval = if h.record.lock().unwrap().status.state() == State::Starting {
+            Duration::from_millis(100)
+        } else {
+            Duration::from_secs(1)
+        };
+        next_observation = Instant::now() + interval;
     }
 }
