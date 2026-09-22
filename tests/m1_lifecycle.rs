@@ -818,3 +818,72 @@ fn finder_and_unrelated_entries_do_not_break_runtime_or_logs() {
     }
     f.boot();
 }
+
+#[test]
+fn missing_wake_recovers_paused_without_restarting_or_stopping_running_apps() {
+    let mut f = Fixture::new();
+    let running_id = f.register(json!({}), None, false);
+    let stopping_id = f.register(json!({}), None, false);
+    f.boot();
+    f.rpc("stop-all", json!({}));
+    for id in [running_id, stopping_id] {
+        f.rpc("start", json!({"installation_id":id}));
+        f.until(id, "RUNNING");
+    }
+    let original = f.state(running_id);
+    let mut pending = f.state(stopping_id);
+    f.crash();
+    fs::remove_file(f.data.join("wake.json")).unwrap();
+    // Simulate a second crash halfway through missing-wake normalization:
+    // one record has advanced, the global wake file is still absent.
+    let mut partially_recovered = original.clone();
+    partially_recovered["operation_epoch"] = json!(2);
+    fs::write(
+        f.data.join("runtime").join(format!("{running_id}.json")),
+        serde_json::to_vec(&partially_recovered).unwrap(),
+    )
+    .unwrap();
+    pending["status"]["state"] = json!("STOPPING");
+    pending["restart_after_stop"] = json!(true);
+    pending["operation_done"] = json!(false);
+    fs::write(
+        f.data.join("runtime").join(format!("{stopping_id}.json")),
+        serde_json::to_vec(&pending).unwrap(),
+    )
+    .unwrap();
+    f.boot();
+    let retained = f.until(running_id, "RUNNING");
+    let stopped = f.until(stopping_id, "STOPPED");
+    assert_eq!(retained["instance_id"], original["instance_id"]);
+    assert_eq!(stopped["instance_id"], pending["instance_id"]);
+    assert_eq!(stopped["restart_after_stop"], false);
+    assert_eq!(f.rpc("status", json!({}))["automatic_wake_paused"], true);
+    f.crash();
+    f.boot();
+    assert_eq!(
+        f.until(running_id, "RUNNING")["instance_id"],
+        original["instance_id"]
+    );
+    assert_eq!(f.state(stopping_id)["status"]["state"], "STOPPED");
+    // Explicit manual start remains permitted while automatic wake is paused.
+    f.rpc("start", json!({"installation_id":stopping_id}));
+    f.until(stopping_id, "RUNNING");
+}
+
+#[test]
+fn dead_failure_survives_daemon_restart_until_explicit_stop() {
+    let mut f = Fixture::new();
+    let id = f.register(json!({"FIXTURE_EXIT_MS":"150"}), None, false);
+    f.boot();
+    f.rpc("start", json!({"installation_id":id}));
+    let failed = f.until(id, "FAILED");
+    wait(|| f.state(id)["collector_alive"] == false);
+    f.crash();
+    f.boot();
+    let recovered = f.state(id);
+    assert_eq!(recovered["status"]["state"], "FAILED");
+    assert_eq!(recovered["status"]["failure"], failed["status"]["failure"]);
+    assert_eq!(recovered["instance_id"], failed["instance_id"]);
+    f.rpc("stop", json!({"installation_id":id}));
+    f.until(id, "STOPPED");
+}

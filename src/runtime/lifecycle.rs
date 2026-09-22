@@ -228,32 +228,26 @@ struct Wake {
     paused: bool,
     stop_epoch: u64,
 }
-fn wake(data: &Path) -> Result<Wake> {
+fn wake(data: &Path) -> Result<Option<Wake>> {
     let bytes = match storage::read(&data.join("wake.json")) {
         Ok(bytes) => bytes,
-        Err(error) if error.code == "NOT_FOUND" => {
-            return Ok(Wake {
-                schema_version: 1,
-                paused: false,
-                stop_epoch: 0,
-            });
-        }
+        Err(error) if error.code == "NOT_FOUND" => return Ok(None),
         Err(error) => return Err(error),
     };
     // Preserve the early boolean-only preference without resetting later epochs.
     if let Ok(paused) = serde_json::from_slice::<bool>(&bytes) {
-        return Ok(Wake {
+        return Ok(Some(Wake {
             schema_version: 1,
             paused,
             stop_epoch: 0,
-        });
+        }));
     }
     let saved: Wake =
         serde_json::from_slice(&bytes).map_err(|_| invalid("Invalid automatic wake preference"))?;
     if saved.schema_version != 1 {
         return Err(invalid("Unsupported automatic wake preference version"));
     }
-    Ok(saved)
+    Ok(Some(saved))
 }
 
 pub(crate) struct Manager {
@@ -291,7 +285,43 @@ impl Manager {
                 fs::remove_file(entry.path()).map_err(|e| storage::io_error(&entry.path(), e))?;
             }
         }
-        let wake = wake(data)?;
+        let mut records = load_records(data)?;
+        let saved_wake = wake(data)?;
+        let missing_wake = saved_wake.is_none();
+        let wake = match saved_wake {
+            Some(wake) => wake,
+            None => Wake {
+                schema_version: 1,
+                paused: !records.is_empty(),
+                stop_epoch: match records.iter().map(|r| r.operation_epoch).max() {
+                    Some(epoch) => epoch
+                        .checked_add(1)
+                        .ok_or_else(|| invalid("Cancellation epoch exhausted"))?,
+                    None => 0,
+                },
+            },
+        };
+        if missing_wake {
+            // Missing global intent is not a fresh StopAll. Normalize every record
+            // FIRST, retaining normal live services and cancelling only restart
+            // continuations. Publish wake last: a crash midway leaves it absent,
+            // so another recovery safely repeats from the largest saved epoch.
+            for r in &mut records {
+                r.operation_epoch = wake.stop_epoch;
+                if r.restart_after_stop {
+                    r.restart_after_stop = false;
+                    r.operation_error = Some(json!(Error::new(
+                        "START_CANCELLED",
+                        "Missing wake preference cancelled pending restart"
+                    )));
+                    if r.status.state() == State::Stopped && r.pending_mutation.is_none() {
+                        r.operation_done = true;
+                    }
+                }
+                save_record(data, r)?;
+            }
+            storage::publish(&data.join("wake.json"), &encode(&wake)?, true)?;
+        }
         let manager = Arc::new(Self {
             data: data.to_owned(),
             handles: Mutex::new(BTreeMap::new()),
@@ -300,7 +330,7 @@ impl Manager {
             stop_epoch: AtomicU64::new(wake.stop_epoch),
         });
         let mut recovered = Vec::new();
-        for mut r in load_records(data)? {
+        for mut r in records {
             let mut live = Live::from_record(&r);
             // Reconcile all identities before advertising the management endpoint.
             live.reconcile(&manager.data, &mut r);
@@ -325,7 +355,10 @@ impl Manager {
                 && !live.any()
                 && !r.management_uncertain
             {
-                r.status.state = State::Stopped;
+                // A dead failed instance is still evidence requiring attention.
+                if r.status.state() != State::Failed {
+                    r.status.state = State::Stopped;
+                }
                 r.operation_done = true;
             }
             save_record(data, &r)?;
