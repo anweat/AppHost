@@ -151,8 +151,11 @@ dialog[open]::backdrop {animation:fade var(--dur-2) ease}#toast.show {animation:
 [data-svc=running] .svc-dot {background:var(--run)}[data-svc=failed] .svc-dot {background:var(--fail)}[data-svc=failed] .svc-state {color:var(--danger)}
 [data-svc=starting] .svc-dot,[data-svc=stopping] .svc-dot {background:var(--warn)}
 /* Contextual Stop All: only beside the running lens, where "all" has an obvious scope. */
-.lens.stop-run {color:var(--danger);background:var(--fail-bg);animation:unfold var(--dur-2) var(--ease)}
-.lens.stop-run svg {width:12px;height:12px;fill:currentColor}.lens.stop-run:hover {background:color-mix(in srgb,var(--danger) 18%,var(--surface))}
+/* Stop All: always in the same place, always labeled; disabled (not hidden) at zero. */
+.stop-all {display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;margin-left:6px;border:1px solid color-mix(in srgb,var(--danger) 45%,transparent);border-radius:16px;background:transparent;color:var(--danger);font-size:13px;font-weight:600;white-space:nowrap;flex-shrink:0;transition:background var(--dur-2),color var(--dur-2),border-color var(--dur-2),opacity var(--dur-2)}
+.stop-all svg {width:11px;height:11px;fill:currentColor;stroke:none}
+.stop-all:hover:not(:disabled) {background:var(--fail-bg)}
+.stop-all:disabled {color:var(--muted);border-color:var(--line);opacity:.7;cursor:default}
 /* Search and action index. */
 /* Own layer and transition group: popovers from the bar always paint above the canvas,
    including during a view transition. */
@@ -230,7 +233,10 @@ pre {margin:0;padding:16px;white-space:pre-wrap;overflow-wrap:anywhere;font:12px
 @media(min-width:1400px){.prototype-bar{margin-top:42px}}
 @media(max-width:1000px){.window{margin:0 16px}.prototype-bar,.demo-controls{margin-left:20px;margin-right:20px}.search-wrap{width:170px}.search-wrap:focus-within{width:230px}.management{grid-template-columns:156px minmax(0,1fr)}.manage-content{padding:24px}}
 @media(max-width:700px){.prototype-bar{display:block;margin-top:18px}.prototype-bar span{display:block;margin-top:4px}.topbar{gap:6px;padding:0 8px}.brand-name,.search-wrap kbd{display:none}.search-wrap,.search-wrap:focus-within{width:auto;flex:1}.bar-status{margin-left:0}.lens{padding:0 8px}.board{--tile:104px;padding:16px}.management{display:block}.sidebar{padding:12px;display:flex;overflow:auto;border-right:0;border-bottom:1px solid var(--line)}.sidebar h2{display:none}.sidebar button{width:auto;flex-shrink:0;margin:0}.manage-content{padding:20px}.banner{padding:12px 20px}.page-heading h1{font-size:28px}.page-heading .primary{white-space:nowrap;flex-shrink:0;font-size:12px;padding:8px 12px}.event{gap:12px}.dialog-body,.dialog-heading{padding:20px}.dialog-actions{padding:16px 20px}}
-@media(max-width:420px){.window{margin:0 8px}.prototype-bar,.demo-controls{margin-left:14px;margin-right:14px}.app-row{gap:8px}.app-row .app-icon{display:none}.app-row>button{padding:7px 10px}.directory-choice{flex-direction:column}.banner{align-items:flex-start;flex-direction:column;gap:8px}.bar-actions{padding-left:4px}.icon-btn{width:32px}}
+@media(max-width:420px){.window{margin:0 8px}.prototype-bar,.demo-controls{margin-left:14px;margin-right:14px}.app-row{gap:8px}.app-row .app-icon{display:none}.app-row>button{padding:7px 10px}.directory-choice{flex-direction:column}.banner{align-items:flex-start;flex-direction:column;gap:8px}.bar-actions{padding-left:4px}.stop-all{padding:0 9px;margin-left:2px}.icon-btn{width:32px}}
 @media(prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important;animation:none!important}[data-state=starting] .badge::before,[data-state=stopping] .badge::before{--spin:90deg}}
 
 @media(max-width:420px){.detail-tabs{padding:0 12px}.detail-tabs button{padding:12px}}
+/* Narrow windows: the search box yields space first; Stop All keeps its label. */
+@media(max-width:700px){.search-wrap{min-width:0}.search-wrap input{min-width:0;width:100%}.topbar>*{flex-shrink:0}.topbar>.search-wrap{flex-shrink:1}}
+@media(max-width:480px){.bar-status{gap:0}.lens{padding:0 6px;gap:5px}.brand{padding:6px 2px}}

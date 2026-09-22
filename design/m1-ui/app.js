@@ -192,11 +192,12 @@ function renderContent() {
   if(!filtering)for(const key of [...collapsed])toggleGroup(key,true);
   layoutRows();syncGroups(display);syncEdges();
 }
-// Status lives in the top bar as dots and numbers. It is a lens, never a sort. Stop All
-// appears beside the running lens, where "all" unambiguously means "these running apps".
+// Status lives in the top bar as dots and numbers. It is a lens, never a sort. Stop All is
+// a labeled, always-present bar button (trust contract): it never moves, and is disabled
+// rather than hidden when nothing is running.
 function renderStatus(display){
   const bar=document.querySelector('#bar-status');
-  if(!bar.childElementCount)bar.innerHTML=`<button class="lens" data-action="lens" data-lens="running" aria-pressed="false" data-tip="运行中 · 点击突出显示" data-tip-delay="300"><i class="chip-dot run" aria-hidden="true"></i><b data-count></b></button><button class="lens stop-run" data-action="stop-all" data-tip="停止这些运行中的应用" data-tip-delay="0" hidden>${icon('stop')}<b data-count></b></button><button class="lens" data-action="lens" data-lens="attention" aria-pressed="false" data-tip="需要处理 · 点击突出显示" data-tip-delay="300"><i class="chip-dot fail" aria-hidden="true"></i><b data-count></b></button><button class="lens paused" data-action="resume" aria-label="自动唤醒已暂停，恢复" data-tip="自动唤醒已暂停 · 点击恢复" data-tip-delay="0" hidden>${icon('pause')}</button>`;
+  if(!bar.childElementCount)bar.innerHTML=`<button class="lens" data-action="lens" data-lens="running" aria-pressed="false" data-tip="运行中 · 点击突出显示" data-tip-delay="300"><i class="chip-dot run" aria-hidden="true"></i><b data-count></b></button><button class="lens" data-action="lens" data-lens="attention" aria-pressed="false" data-tip="需要处理 · 点击突出显示" data-tip-delay="300"><i class="chip-dot fail" aria-hidden="true"></i><b data-count></b></button><button class="lens paused" data-action="resume" aria-label="自动唤醒已暂停，恢复" data-tip="自动唤醒已暂停 · 点击恢复" data-tip-delay="0" hidden>${icon('pause')}</button>`;
   const counts={running:display.filter(hasLive).length,attention:display.filter(attention).length};
   for(const name of ['running','attention']){
     const button=bar.querySelector(`[data-lens="${name}"]`);
@@ -206,10 +207,11 @@ function renderStatus(display){
     if(!counts[name]&&lens===name)lens=null;
     button.setAttribute('aria-pressed',String(lens===name));
   }
-  const stop=bar.querySelector('.stop-run');
-  stop.hidden=!(lens==='running'&&counts.running&&connected&&view==='home');
-  stop.querySelector('[data-count]').textContent=counts.running;
-  stop.setAttribute('aria-label',`停止全部 ${counts.running} 个运行中的应用`);
+  const stop=document.querySelector('#stop-all'),stopping=display.some(a=>a.state==='STOPPING');
+  stop.disabled=!connected||!counts.running;
+  stop.querySelector('span').textContent=stopping&&!counts.running?'正在停止':'全部停止';
+  stop.setAttribute('aria-label',counts.running?`全部停止：停止 ${counts.running} 个运行中的应用并暂停自动唤醒`:'全部停止：当前没有运行中的应用');
+  stop.dataset.tip=connected?(counts.running?`停止全部 ${counts.running} 个运行中的应用，并暂停自动唤醒`:'没有运行中的应用'):'后台未连接';stop.dataset.tipDelay='200';
   bar.querySelector('.paused').hidden=!paused;
   const board=main.querySelector('.board');if(board&&board.dataset.lens!==(lens||''))board.dataset.lens=lens||'';
 }
