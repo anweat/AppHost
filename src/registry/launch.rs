@@ -26,7 +26,9 @@ impl LaunchSnapshot {
                 "Launch snapshot belongs to a different data directory",
             ));
         }
-        let _lock = super::lock(data_dir)?;
+        // Runtime dispatch tolerates a short external writer, then revalidates
+        // the snapshot under the acquired lock. Other registry commands stay nonblocking.
+        let _lock = super::lock_wait(data_dir, std::time::Duration::from_secs(2))?;
         let current = from_registry(load(data_dir)?, self.installation.installation_id, data_dir)?;
         if current.registry_version != self.registry_version
             || current.installation.revision != self.installation.revision

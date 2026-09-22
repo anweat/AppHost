@@ -82,7 +82,13 @@ impl Live {
         }
     }
 }
-fn spawn(data: &Path, h: &Handle, plan: LaunchPlan, live: &mut Live) -> Result<()> {
+fn spawn(manager: &Manager, h: &Handle, plan: LaunchPlan, live: &mut Live) -> Result<()> {
+    // Serialize synchronous dispatch only; readiness and stop never hold this mutex.
+    let _dispatch = manager.launch_dispatch.lock().unwrap();
+    if h.control.load(Ordering::Acquire) != 0 {
+        return Ok(());
+    }
+    let data = &manager.data;
     let (root, count) = {
         let r = h.record.lock().unwrap();
         (log_path(data, &r), r.services.len())
@@ -233,16 +239,19 @@ pub(super) fn run(
     loop {
         if let Some(prepared) = plan.take()
             && h.control.load(Ordering::Acquire) == 0
-            && let Err(error) = spawn(&manager.data, h, prepared, live)
         {
-            let mut r = h.record.lock().unwrap();
-            r.status.fail(&error.code);
-            r.operation_done = true;
-            r.operation_error = Some(json!(error));
-            if error.code == "MANAGEMENT_UNCERTAIN" {
-                r.management_uncertain = true;
+            let result = spawn(manager, h, prepared, live);
+            started = Instant::now();
+            if let Err(error) = result {
+                let mut r = h.record.lock().unwrap();
+                r.status.fail(&error.code);
+                r.operation_done = true;
+                r.operation_error = Some(json!(error));
+                if error.code == "MANAGEMENT_UNCERTAIN" {
+                    r.management_uncertain = true;
+                }
+                save_record(&manager.data, &r)?;
             }
-            save_record(&manager.data, &r)?;
         }
         let control = h.control.load(Ordering::Acquire);
         if control != 0 {

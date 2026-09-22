@@ -11,7 +11,6 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     fs,
-    net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Stdio},
     sync::{
@@ -249,6 +248,7 @@ fn wake(data: &Path) -> Result<Wake> {
 pub(crate) struct Manager {
     data: PathBuf,
     handles: Mutex<BTreeMap<Uuid, Arc<Handle>>>,
+    launch_dispatch: Mutex<()>,
     paused: AtomicBool,
     stop_epoch: AtomicU64,
 }
@@ -284,6 +284,7 @@ impl Manager {
         let manager = Arc::new(Self {
             data: data.to_owned(),
             handles: Mutex::new(BTreeMap::new()),
+            launch_dispatch: Mutex::new(()),
             paused: AtomicBool::new(wake.paused),
             stop_epoch: AtomicU64::new(wake.stop_epoch),
         });
@@ -640,17 +641,21 @@ fn receipt(r: &Record) -> Value {
     json!({"installation_id":r.installation_id,"instance_id":r.instance_id,"operation_id":r.operation_id,"operation_done":r.operation_done,"state":r.status.state()})
 }
 fn port_available(port: u16) -> Result<()> {
-    for host in ["127.0.0.1", "[::1]"] {
-        TcpListener::bind(format!("{host}:{port}")).map_err(|e| {
-            Error::new(
-                "PORT_IN_USE",
-                "Declared loopback port is unavailable; no process was stopped",
-            )
-            .details(json!({"port":port,"address":host,"reason":e.to_string(),"ownership":process::port_owners(port)}))
-        })?;
+    unsafe extern "C" {
+        fn apphost_port_available(port: u16, family: i32) -> i32;
+    }
+    for (host, family) in [("0.0.0.0", libc::AF_INET), ("::", libc::AF_INET6)] {
+        let error = unsafe { apphost_port_available(port, family) };
+        if error != 0 {
+            return Err(Error::new(
+                if error == libc::EADDRINUSE { "PORT_IN_USE" } else { "PORT_CHECK_FAILED" },
+                "Declared port is unavailable; no process was stopped",
+            ).details(json!({"port":port,"address":host,"reason":std::io::Error::from_raw_os_error(error).to_string(),"ownership":process::port_owners(port)})));
+        }
     }
     Ok(())
 }
+
 impl Manager {
     pub fn dispatch(self: &Arc<Self>, request: &crate::daemon::protocol::Request) -> Result<Value> {
         #[derive(Deserialize)]

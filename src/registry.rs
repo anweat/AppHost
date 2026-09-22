@@ -303,6 +303,10 @@ impl Drop for RegistryLock {
 }
 
 fn lock(data_dir: &Path) -> Result<RegistryLock> {
+    lock_wait(data_dir, std::time::Duration::ZERO)
+}
+
+fn lock_wait(data_dir: &Path, timeout: std::time::Duration) -> Result<RegistryLock> {
     storage::private_directory(data_dir)?;
     let path = data_dir.join("registry.lock");
     let file = OpenOptions::new()
@@ -312,13 +316,22 @@ fn lock(data_dir: &Path) -> Result<RegistryLock> {
         .write(true)
         .open(&path)
         .map_err(|e| storage::io_error(&path, e))?;
-    FileExt::try_lock_exclusive(&file).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::WouldBlock {
-            Error::new("BUSY", "Another registration command is running")
-        } else {
-            storage::io_error(&path, e)
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match FileExt::try_lock_exclusive(&file) {
+            Ok(()) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(Error::new(
+                        "BUSY",
+                        "Registry is busy; retry after the current registration operation",
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => return Err(storage::io_error(&path, e)),
         }
-    })?;
+    }
     Ok(RegistryLock(file))
 }
 

@@ -651,3 +651,59 @@ fn stop_all_global_intent_survives_a_crash_before_individual_records_are_updated
     assert_ne!(started["instance_id"], original["instance_id"]);
     assert_eq!(f.rpc("status", json!({}))["automatic_wake_paused"], true);
 }
+
+#[test]
+fn different_installations_start_concurrently() {
+    let mut f = Fixture::new();
+    let ids: Vec<_> = (0..4).map(|_| f.register(json!({}), None, true)).collect();
+    f.boot();
+    let barrier = std::sync::Barrier::new(ids.len());
+    thread::scope(|scope| {
+        let barrier = &barrier;
+        let f = &f;
+        for id in &ids {
+            scope.spawn(move || {
+                barrier.wait();
+                f.rpc("start", json!({"installation_id":id}));
+            });
+        }
+    });
+    for id in ids {
+        f.until(id, "RUNNING");
+    }
+}
+
+#[test]
+fn wildcard_listeners_are_rejected_before_spawn() {
+    let mut f = Fixture::new();
+    for host in ["0.0.0.0:0", "[::]:0"] {
+        let foreign = TcpListener::bind(host).unwrap();
+        let port = foreign.local_addr().unwrap().port();
+        let id = f.register(json!({}), Some(port), false);
+        if f.daemon.is_none() {
+            f.boot();
+        }
+        let error =
+            daemon::call(&f.data, "start", json!({"installation_id":id}), false).unwrap_err();
+        assert_eq!(error.code, "PORT_IN_USE");
+        assert_eq!(f.rpc("status", json!({}))["instances"], json!([]));
+    }
+}
+
+#[test]
+fn start_waits_for_external_registry_writer() {
+    use fs2::FileExt;
+    let mut f = Fixture::new();
+    let id = f.register(json!({}), None, false);
+    f.boot();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(f.data.join("registry.lock"))
+        .unwrap();
+    lock.lock_exclusive().unwrap();
+    f.rpc("start", json!({"installation_id":id}));
+    thread::sleep(Duration::from_millis(350));
+    FileExt::unlock(&lock).unwrap();
+    f.until(id, "RUNNING");
+}
