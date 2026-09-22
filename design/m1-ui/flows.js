@@ -24,8 +24,8 @@ async function handleFlow(action,app,button){
     case 'commit-import':{
       if(!document.querySelector('#confirm-declaration').checked||!requireConnection())return;
       const chosen=candidates.filter(c=>importSelection.includes(c.id));
-      for(const c of chosen)apps.push({...c,sourceId:c.id,id:`${c.id}-${++nextId}`,projectId:`00000000-0000-4000-8000-${String(100+nextId).padStart(12,'0')}`,path:`~/Projects/demo-workspace/${c.id}`,branch:'main',state:'STOPPED',recent:0});
-      event(`导入 ${chosen.length} 个应用并确认声明`);closeModal();view='home';query='';filter='all';document.querySelector('#search').value='';render();toast(`已导入 ${chosen.length} 个应用，点击磁贴即可启动。`);break;
+      for(const c of chosen)apps.push({...c,sourceId:c.id,id:`${c.id}-${++nextId}`,projectId:`00000000-0000-4000-8000-${String(100+nextId).padStart(12,'0')}`,path:`~/Projects/demo-workspace/${c.id}`,branch:'main',state:'STOPPED'});
+      event(`导入 ${chosen.length} 个应用并确认声明`);closeModal();view='home';query='';document.querySelector('#search').value='';render();toast(`已导入 ${chosen.length} 个应用，点击磁贴即可启动。`);break;
     }
     case 'diagnostic':diagnostic(app);break;
     case 'copy-diagnostic':{
