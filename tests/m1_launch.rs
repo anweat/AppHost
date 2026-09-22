@@ -404,3 +404,45 @@ fn unchanged_legacy_v1_record_is_not_invalidated_by_another_installation() {
         1
     );
 }
+
+#[test]
+fn launch_lock_wait_is_bounded_and_rechecks_after_the_writer_finishes() {
+    use fs2::FileExt;
+    use std::time::{Duration, Instant};
+    let f = Fixture::new(1);
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(f.data.join("registry.lock"))
+        .unwrap();
+    lock.lock_exclusive().unwrap();
+    let plan = LaunchPlan::prepare(&f.data, f.id).unwrap();
+    let start = Instant::now();
+    assert_eq!(
+        plan.with_current::<()>(&f.data, |_| panic!("must not dispatch under a busy lock"))
+            .unwrap_err()
+            .code,
+        "BUSY"
+    );
+    assert!(start.elapsed() >= Duration::from_secs(2));
+    assert!(start.elapsed() < Duration::from_secs(4));
+    let plan = LaunchPlan::prepare(&f.data, f.id).unwrap();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            std::thread::sleep(Duration::from_millis(150));
+            let path = f.data.join("registry.json");
+            let mut registry: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            let revision = registry["installations"][0]["revision"].as_u64().unwrap();
+            registry["installations"][0]["revision"] = serde_json::json!(revision + 1);
+            fs::write(path, serde_json::to_vec(&registry).unwrap()).unwrap();
+            FileExt::unlock(&lock).unwrap();
+        });
+        assert_eq!(
+            plan.with_current::<()>(&f.data, |_| panic!("must reject the queued stale snapshot"))
+                .unwrap_err()
+                .code,
+            "STALE_LAUNCH"
+        );
+    });
+}

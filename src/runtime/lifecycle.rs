@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     fs,
+    net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Stdio},
     sync::{
@@ -685,17 +686,16 @@ fn receipt(r: &Record) -> Value {
     json!({"installation_id":r.installation_id,"instance_id":r.instance_id,"operation_id":r.operation_id,"operation_done":r.operation_done,"state":r.status.state()})
 }
 fn port_available(port: u16) -> Result<()> {
-    unsafe extern "C" {
-        fn apphost_port_available(port: u16, family: i32) -> i32;
-    }
-    for (host, family) in [("0.0.0.0", libc::AF_INET), ("::", libc::AF_INET6)] {
-        let error = unsafe { apphost_port_available(port, family) };
-        if error != 0 {
-            return Err(Error::new(
-                if error == libc::EADDRINUSE { "PORT_IN_USE" } else { "PORT_CHECK_FAILED" },
+    // macOS permits a reusable wildcard bind beside a specific-address listener
+    // (and vice versa). Check both addresses in both families. Keep REUSEADDR:
+    // a socket without it also rejects a closed server's harmless TIME_WAIT.
+    for host in ["0.0.0.0", "127.0.0.1", "[::]", "[::1]"] {
+        TcpListener::bind(format!("{host}:{port}")).map_err(|e| {
+            Error::new(
+                if e.kind() == std::io::ErrorKind::AddrInUse { "PORT_IN_USE" } else { "PORT_CHECK_FAILED" },
                 "Declared port is unavailable; no process was stopped",
-            ).details(json!({"port":port,"address":host,"reason":std::io::Error::from_raw_os_error(error).to_string(),"ownership":process::port_owners(port)})));
-        }
+            ).details(json!({"port":port,"address":host,"reason":e.to_string(),"ownership":process::port_owners(port)}))
+        })?;
     }
     Ok(())
 }

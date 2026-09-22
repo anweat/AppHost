@@ -4,8 +4,6 @@
 #include <netinet/in.h>
 #include <stdlib.h>
 #include <errno.h>
-#include <fcntl.h>
-#include <unistd.h>
 
 /* 1 = matching listener, 0 = none, -1 = inspection incomplete. */
 int apphost_pid_listens(int pid, unsigned short port, int family) {
@@ -40,35 +38,4 @@ int apphost_pid_listens(int pid, unsigned short port, int family) {
     }
     free(fds);
     return result;
-}
-
-/* Probe wildcard addresses without SO_REUSEADDR: on macOS a reusable
- * loopback bind can succeed beside an existing wildcard listener. */
-int apphost_port_available(unsigned short port, int family) {
-    int fd = socket(family, SOCK_STREAM, 0);
-    if (fd < 0) return errno;
-    if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0) {
-        int error = errno;
-        close(fd);
-        return error;
-    }
-    int rc;
-    if (family == AF_INET) {
-        struct sockaddr_in address = {0};
-        address.sin_len = sizeof(address);
-        address.sin_family = AF_INET;
-        address.sin_port = htons(port);
-        address.sin_addr.s_addr = htonl(INADDR_ANY);
-        rc = bind(fd, (struct sockaddr *)&address, sizeof(address));
-    } else {
-        struct sockaddr_in6 address = {0};
-        address.sin6_len = sizeof(address);
-        address.sin6_family = AF_INET6;
-        address.sin6_port = htons(port);
-        address.sin6_addr = in6addr_any;
-        rc = bind(fd, (struct sockaddr *)&address, sizeof(address));
-    }
-    int error = rc < 0 ? errno : 0;
-    close(fd);
-    return error;
 }

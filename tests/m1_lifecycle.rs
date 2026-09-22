@@ -701,7 +701,7 @@ fn different_installations_start_concurrently() {
 #[test]
 fn wildcard_listeners_are_rejected_before_spawn() {
     let mut f = Fixture::new();
-    for host in ["0.0.0.0:0", "[::]:0"] {
+    for host in ["0.0.0.0:0", "[::]:0", "127.0.0.1:0", "[::1]:0"] {
         let foreign = TcpListener::bind(host).unwrap();
         let port = foreign.local_addr().unwrap().port();
         let id = f.register(json!({}), Some(port), false);
@@ -886,4 +886,23 @@ fn dead_failure_survives_daemon_restart_until_explicit_stop() {
     assert_eq!(recovered["instance_id"], failed["instance_id"]);
     f.rpc("stop", json!({"installation_id":id}));
     f.until(id, "STOPPED");
+}
+
+#[test]
+fn closed_server_time_wait_does_not_block_a_new_instance() {
+    use std::io::Read;
+    let mut f = Fixture::new();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let (server, _) = listener.accept().unwrap();
+    // The server initiates FIN and enters TIME_WAIT after the peer closes.
+    drop(server);
+    assert_eq!(client.read(&mut [0u8; 1]).unwrap(), 0);
+    drop(client);
+    drop(listener);
+    let id = f.register(json!({"FIXTURE_PORT":port.to_string()}), Some(port), false);
+    f.boot();
+    f.rpc("start", json!({"installation_id":id}));
+    f.until(id, "RUNNING");
 }
