@@ -3,30 +3,34 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
+  <meta name="color-scheme" content="light dark">
   <title>AppHost · M1 交互设计</title>
   <link rel="stylesheet" href="styles.css">
   <script src="assets/icons.js" defer></script>
   <script src="components/app-tile.js" defer></script>
+  <script src="components/context-menu.js" defer></script>
   <script src="components/logs-panel.js" defer></script>
   <script src="components/terminal-panel.js" defer></script>
+  <script src="components/palette.js" defer></script>
   <script src="app.js" defer></script>
   <script src="flows.js" defer></script>
 </head>
 <body>
   <div class="prototype-bar"><strong>M1 · 交互原型</strong><span>示例数据 · 不操作真实进程</span></div>
   <div class="window">
-    <header class="toolbar">
-      <button class="wordmark" data-action="home" aria-label="AppHost 应用首页"><span class="brand-mark"><i></i><i></i><i></i><i></i></span>AppHost</button>
-      <div class="search-wrap"><span aria-hidden="true">⌕</span><input id="search" type="search" aria-label="搜索应用或分支" placeholder="搜索应用或分支"><kbd>⌘ K</kbd></div>
-      <button class="quiet" data-action="manage">管理</button>
-      <button class="stop-all" data-action="stop-all"><span aria-hidden="true">■</span> 全部停止</button>
+    <header class="topbar">
+      <button class="brand" data-action="home" aria-label="AppHost 首页" data-tip="AppHost"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span class="brand-name">AppHost</span><i id="connection-dot" class="link-dot" aria-hidden="true"></i></button>
+      <label class="search-wrap"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14Zm5-2 5 5"/></svg><input id="search" type="search" aria-label="搜索应用" placeholder="搜索"><kbd>⌘K</kbd></label>
+      <div id="bar-status" class="bar-status" role="toolbar" aria-label="按状态突出显示"></div>
+      <div class="bar-actions">
+        <button class="icon-btn" data-action="add-menu" aria-label="添加应用或新建分组" data-tip="添加应用 · 新建分组"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+        <button class="icon-btn" data-action="manage" aria-label="管理" data-tip="管理"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3v7m0 4v7m6-18v3m0 4v11m6-18v11m0 4v3M3 10h6v4H3v-4Zm6-4h6v4H9V6Zm6 8h6v4h-6v-4"/></svg></button>
+      </div>
     </header>
-    <main id="main"></main>
     <div id="connection-banner"></div>
-    <footer class="app-footer"><span id="connection-status">● 后台已连接</span><button class="text-button" data-action="close-window" aria-label="关闭窗口与停止应用的区别">窗口与后台</button></footer>
+    <main id="main"></main>
   </div>
-  <details class="demo-controls"><summary>演示场景</summary><div class="demo-actions"><button data-action="reset">默认面板</button><button data-action="empty">首次使用</button><button data-action="free-port">解除示例端口占用</button><button data-action="disconnect">后台断开 / 重连</button></div></details>
+  <details class="demo-controls"><summary>演示场景</summary><div class="demo-actions"><button data-action="reset">默认面板</button><button data-action="empty">首次使用</button><button data-action="free-port">解除示例端口占用</button><button data-action="reload-blip">模拟热重载</button><button data-action="service-fail">模拟服务故障</button><button data-action="disconnect">后台断开 / 重连</button></div></details>
   <dialog id="detail" class="drawer" aria-labelledby="detail-title"></dialog>
   <dialog id="modal" class="modal" aria-labelledby="modal-title"></dialog>
   <div id="toast" role="status" aria-live="polite"></div>

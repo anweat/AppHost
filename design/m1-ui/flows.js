@@ -62,5 +62,13 @@ async function handleFlow(action,app,button){
 }
 document.addEventListener('change',e=>{
   if(e.target.id==='confirm-declaration')document.querySelector('#commit-import').disabled=!e.target.checked;
-  if(e.target.dataset.setting){if(!requireConnection()){e.target.checked=preferences[e.target.dataset.setting];return;}preferences[e.target.dataset.setting]=e.target.checked;event(`${e.target.checked?'启用':'关闭'}${e.target.dataset.setting==='login'?'登录自启':'托盘常驻'}（示例）`);toast('仅更改此原型的示例设置。');}
+  if(e.target.dataset.setting){
+    const key=e.target.dataset.setting,value=e.target.type==='checkbox'?e.target.checked:e.target.value;
+    // Daemon-side settings need a connection; appearance and search are desktop-local.
+    if(['login','tray'].includes(key)&&!requireConnection()){e.target.checked=preferences[key];return;}
+    preferences[key]=value;if(key==='theme')applyTheme();
+    event(`${SETTING_LABEL[key]}：${typeof value==='boolean'?(value?'开启':'关闭'):e.target.selectedOptions[0].textContent}（示例）`);
+    if(['login','tray'].includes(key))toast('仅更改此原型的示例设置。');
+    palette.refresh();
+  }
 });
