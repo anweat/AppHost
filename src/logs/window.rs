@@ -23,6 +23,7 @@ pub struct LogChunk {
 #[derive(Debug, Default, Serialize)]
 pub struct LogWindow {
     pub chunks: Vec<LogChunk>,
+    pub warnings: Vec<serde_json::Value>,
     pub prefix_evicted: bool,
     pub incomplete_tail: bool,
     pub truncated: bool,
@@ -86,17 +87,14 @@ pub fn read_window(
         }
         segments.push(number);
     }
-    if ignored > 0 {
-        eprintln!(
-            "AppHost: ignored {ignored} unrelated entries in {}",
-            root.display()
-        );
-    }
     if segments.len() > 100 {
         return Err(invalid("Too many log segments"));
     }
     segments.sort_unstable();
-    let mut window = LogWindow::default();
+    let mut window = LogWindow {
+        warnings: crate::storage::directory_warnings(root, ignored),
+        ..LogWindow::default()
+    };
     let mut read_bytes = 0;
     let mut scanned = 0usize;
     let mut previous: Option<(u64, u128)> = None;

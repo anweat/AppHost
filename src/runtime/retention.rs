@@ -51,11 +51,11 @@ fn size(root: &Path, depth: usize, count: &mut usize) -> Result<u64> {
     }
     Ok(total)
 }
-pub(super) fn prune(data: &Path, id: Uuid, active: Uuid) -> Result<()> {
+pub(super) fn prune(data: &Path, id: Uuid, active: Uuid) -> Result<Vec<serde_json::Value>> {
     let root = data.join("instances");
     let entries = match fs::read_dir(&root) {
         Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
         Err(e) => return Err(storage::io_error(&root, e)),
     };
     let now = SystemTime::now()
@@ -113,12 +113,6 @@ pub(super) fn prune(data: &Path, id: Uuid, active: Uuid) -> Result<()> {
             e.path(),
         ));
     }
-    if ignored > 0 {
-        eprintln!(
-            "AppHost: ignored {ignored} unrelated entries in {}",
-            root.display()
-        );
-    }
     archives.sort_by_key(|entry| entry.0);
     let mut bytes: u64 = archives.iter().map(|a| a.1).sum();
     for (created, size, path) in archives {
@@ -127,7 +121,7 @@ pub(super) fn prune(data: &Path, id: Uuid, active: Uuid) -> Result<()> {
             bytes = bytes.saturating_sub(size);
         }
     }
-    Ok(())
+    Ok(storage::directory_warnings(&root, ignored))
 }
 pub(super) fn read(data: &Path, id: Uuid, instance: Uuid) -> Result<Record> {
     let path = data

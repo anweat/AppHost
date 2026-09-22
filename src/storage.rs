@@ -200,3 +200,16 @@ pub fn publish(path: &Path, bytes: &[u8], replace: bool) -> Result<()> {
         .map_err(|e| io_error(parent, e))?;
     Ok(())
 }
+
+/// Per-scan observations belong in successful JSON results, never CLI stderr.
+pub(crate) fn directory_warnings(path: &Path, count: usize) -> Vec<serde_json::Value> {
+    if count == 0 {
+        return Vec::new();
+    }
+    vec![serde_json::json!({
+        "code":"IGNORED_DIRECTORY_ENTRIES", "level":"warning",
+        "title":"Unrelated directory entries were ignored",
+        "evidence":{"path":path,"count":count}, "actions":[],
+        "clears_when":"A subsequent scan of this directory finds no unrelated entries"
+    })]
+}

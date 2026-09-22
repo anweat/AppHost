@@ -70,6 +70,8 @@ pub struct Record {
     pub operation_done: bool,
     pub operation_error: Option<Value>,
     pub operation_result: Option<Value>,
+    #[serde(default)]
+    pub warnings: Vec<Value>,
     pub pending_mutation: Option<Mutation>,
     pub restart_after_stop: bool,
     pub status: InstanceStatus,
@@ -125,6 +127,7 @@ fn new_record(id: Uuid, op: Uuid, plan: &LaunchPlan, epoch: u64) -> Record {
         operation_done: false,
         operation_error: None,
         operation_result: None,
+        warnings: Vec::new(),
         pending_mutation: None,
         restart_after_stop: false,
         status: InstanceStatus::default(),
@@ -154,11 +157,11 @@ fn new_record(id: Uuid, op: Uuid, plan: &LaunchPlan, epoch: u64) -> Record {
         management_uncertain: false,
     }
 }
-fn load_records(data: &Path) -> Result<Vec<Record>> {
+fn load_records(data: &Path) -> Result<(Vec<Record>, Vec<Value>)> {
     let root = data.join("runtime");
     let entries = match fs::read_dir(&root) {
         Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((vec![], vec![])),
         Err(e) => return Err(storage::io_error(&root, e)),
     };
     let mut records = Vec::new();
@@ -203,23 +206,18 @@ fn load_records(data: &Path) -> Result<Vec<Record>> {
         }
         records.push(r);
     }
-    if ignored > 0 {
-        eprintln!(
-            "AppHost: ignored {ignored} unrelated entries in {}",
-            root.display()
-        );
-    }
     if records.len() > MAX_RECORDS {
         return Err(invalid("Too many runtime records"));
     }
-    Ok(records)
+    Ok((records, storage::directory_warnings(&root, ignored)))
 }
 pub fn history(data: &Path, id: Option<Uuid>) -> Result<Value> {
-    let records: Vec<_> = load_records(data)?
+    let (records, warnings) = load_records(data)?;
+    let records: Vec<_> = records
         .into_iter()
         .filter(|r| id.is_none_or(|id| r.installation_id == id))
         .collect();
-    Ok(json!({"live":false,"instances":records}))
+    Ok(json!({"live":false,"instances":records,"warnings":warnings}))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -255,6 +253,7 @@ pub(crate) struct Manager {
     data: PathBuf,
     handles: Mutex<BTreeMap<Uuid, Arc<Handle>>>,
     launch_dispatch: Mutex<()>,
+    startup_warnings: Vec<Value>,
     paused: AtomicBool,
     stop_epoch: AtomicU64,
 }
@@ -286,7 +285,7 @@ impl Manager {
                 fs::remove_file(entry.path()).map_err(|e| storage::io_error(&entry.path(), e))?;
             }
         }
-        let mut records = load_records(data)?;
+        let (mut records, startup_warnings) = load_records(data)?;
         let saved_wake = wake(data)?;
         let missing_wake = saved_wake.is_none();
         let wake = match saved_wake {
@@ -327,6 +326,7 @@ impl Manager {
             data: data.to_owned(),
             handles: Mutex::new(BTreeMap::new()),
             launch_dispatch: Mutex::new(()),
+            startup_warnings,
             paused: AtomicBool::new(wake.paused),
             stop_epoch: AtomicU64::new(wake.stop_epoch),
         });
@@ -445,7 +445,7 @@ impl Manager {
             .map(|(_, h)| h.record.lock().unwrap().clone())
             .collect();
         Ok(
-            json!({"live":true,"automatic_wake_paused":self.paused.load(Ordering::Acquire),"instances":records}),
+            json!({"live":true,"automatic_wake_paused":self.paused.load(Ordering::Acquire),"instances":records,"warnings":self.startup_warnings}),
         )
     }
     pub fn start(self: &Arc<Self>, id: Uuid) -> Result<Value> {

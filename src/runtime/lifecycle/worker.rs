@@ -100,7 +100,8 @@ fn spawn(manager: &Manager, h: &Handle, plan: LaunchPlan, live: &mut Live) -> Re
         let r = h.record.lock().unwrap();
         (r.installation_id, r.instance_id)
     };
-    retention::prune(data, id, instance)?;
+    let warnings = retention::prune(data, id, instance)?;
+    h.record.lock().unwrap().warnings = warnings;
     storage::private_directory(root.parent().unwrap())?;
     {
         let mut r = h.record.lock().unwrap();
@@ -540,6 +541,6 @@ mod tests {
         let prepared = receiver.recv_timeout(Duration::from_secs(3));
         drop(gate);
         thread.join().unwrap();
-        assert_eq!(prepared.unwrap(), true);
+        assert!(prepared.unwrap());
     }
 }

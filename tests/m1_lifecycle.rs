@@ -784,6 +784,11 @@ fn finder_and_unrelated_entries_do_not_break_runtime_or_logs() {
     f.boot();
     f.rpc("start", json!({"installation_id":id}));
     let running = f.until(id, "RUNNING");
+    assert_eq!(running["warnings"][0]["evidence"]["count"], 3);
+    assert_eq!(
+        f.rpc("status", json!({}))["warnings"][0]["evidence"]["count"],
+        3
+    );
     let instance = running["instance_id"].as_str().unwrap();
     let logs = f.data.join("instances").join(instance).join("logs");
     for name in [".DS_Store", "notes.txt", "01"] {
@@ -791,6 +796,7 @@ fn finder_and_unrelated_entries_do_not_break_runtime_or_logs() {
     }
     let result = f.rpc("logs", json!({"installation_id":id,"instance_id":instance,"from_ms":0,"to_ms":u64::MAX,"limit":4096}));
     assert!(!result["window"]["chunks"].as_array().unwrap().is_empty());
+    assert_eq!(result["window"]["warnings"][0]["evidence"]["count"], 3);
     f.rpc("restart", json!({"installation_id":id}));
     f.until(id, "RUNNING");
     assert!(f.data.join("runtime/.DS_Store").exists());
@@ -905,4 +911,39 @@ fn closed_server_time_wait_does_not_block_a_new_instance() {
     f.boot();
     f.rpc("start", json!({"installation_id":id}));
     f.until(id, "RUNNING");
+}
+
+#[test]
+fn offline_status_reports_directory_warnings_as_json_without_stderr() {
+    let mut f = Fixture::new();
+    f.register(json!({}), None, false);
+    fs::create_dir(f.data.join("runtime")).unwrap();
+    let clutter = f.data.join("runtime/.DS_Store");
+    fs::write(&clutter, b"finder").unwrap();
+    let status = || {
+        Command::new(env!("CARGO_BIN_EXE_apphost"))
+            .arg("--data-dir")
+            .arg(&f.data)
+            .arg("status")
+            .output()
+            .unwrap()
+    };
+    let output = status();
+    assert!(output.status.success());
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["live"], false);
+    assert_eq!(value["warnings"][0]["code"], "IGNORED_DIRECTORY_ENTRIES");
+    assert_eq!(value["warnings"][0]["evidence"]["count"], 1);
+    fs::remove_file(clutter).unwrap();
+    let output = status();
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()["warnings"],
+        json!([])
+    );
 }
