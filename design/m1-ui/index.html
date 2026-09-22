@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>AppHost · M1 交互设计</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+  <script src="flows.js" defer></script>
+</head>
+<body>
+  <div class="prototype-bar"><strong>AppHost / M1</strong><span>交互设计原型 · 全部为示例数据，操作不会启动或停止真实进程</span></div>
+  <div class="window">
+    <header class="toolbar">
+      <button class="wordmark" data-action="home" aria-label="AppHost 应用首页"><span class="brand-mark"><i></i><i></i><i></i><i></i></span>AppHost</button>
+      <div class="search-wrap"><span aria-hidden="true">⌕</span><input id="search" type="search" aria-label="搜索应用或分支" placeholder="搜索应用或分支"><kbd>⌘ K</kbd></div>
+      <button class="quiet" data-action="manage">管理</button>
+      <button class="stop-all" data-action="stop-all"><span aria-hidden="true">■</span> 全部停止</button>
+    </header>
+    <div id="connection-banner"></div>
+    <main id="main"></main>
+    <footer class="app-footer"><span id="connection-status">● 后台已连接</span><span>关闭窗口不会停止正在运行的应用 <button class="text-button" data-action="close-window">了解</button></span></footer>
+  </div>
+  <aside class="demo-controls" aria-label="原型场景切换"><span>演示场景</span><button data-action="reset">默认面板</button><button data-action="empty">首次使用</button><button data-action="free-port">解除示例端口占用</button><button data-action="disconnect">后台断开 / 重连</button></aside>
+  <dialog id="detail" class="drawer" aria-labelledby="detail-title"></dialog>
+  <dialog id="modal" class="modal" aria-labelledby="modal-title"></dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
