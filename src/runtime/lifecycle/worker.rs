@@ -82,9 +82,12 @@ impl Live {
         }
     }
 }
+fn lock_dispatch(lock: &Mutex<()>) -> std::sync::MutexGuard<'_, ()> {
+    // This gate contains no mutable data. A panic in one installation must not
+    // poison dispatch for every other installation; its own record stays separate.
+    lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 fn spawn(manager: &Manager, h: &Handle, plan: LaunchPlan, live: &mut Live) -> Result<()> {
-    // Serialize synchronous dispatch only; readiness and stop never hold this mutex.
-    let _dispatch = manager.launch_dispatch.lock().unwrap();
     if h.control.load(Ordering::Acquire) != 0 {
         return Ok(());
     }
@@ -128,6 +131,9 @@ fn spawn(manager: &Manager, h: &Handle, plan: LaunchPlan, live: &mut Live) -> Re
     live.groups = (0..count).map(|_| None).collect();
     live.children = (0..count).map(|_| None).collect();
     plan.with_current(data, |services| {
+        // Preparation, cleanup, collector readiness and registry-lock waiting
+        // are complete. Only spawn and its identity checkpoints hold this gate.
+        let _dispatch = lock_dispatch(&manager.launch_dispatch);
         for (i, (service, (out, err))) in services
             .into_iter()
             .zip(pipes.outputs.drain(..))
@@ -480,5 +486,60 @@ pub(super) fn run(
             Duration::from_secs(1)
         };
         next_observation = Instant::now() + interval;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn poisoned_dispatch_gate_does_not_block_other_installations() {
+        let gate = Mutex::new(());
+        let panic = std::panic::catch_unwind(|| {
+            let _guard = gate.lock().unwrap();
+            panic!("simulated installation panic");
+        });
+        assert!(panic.is_err());
+        let _guard = lock_dispatch(&gate);
+    }
+
+    #[test]
+    fn busy_dispatch_gate_does_not_block_collector_preparation() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project");
+        fs::create_dir(&root).unwrap();
+        let data = temp.path().join("data");
+        let manifest: crate::Manifest = serde_json::from_value(json!({
+            "schema_version":1,"project_id":Uuid::new_v4(),"name":"fixture",
+            "services":[{"name":"service","command":["/bin/sleep","1"]}]
+        }))
+        .unwrap();
+        fs::write(root.join("apphost.toml"), manifest.to_toml().unwrap()).unwrap();
+        let id = crate::import(&data, &crate::scan(&root, 0).unwrap()).unwrap()[0].installation_id;
+        let plan = LaunchPlan::prepare(&data, id).unwrap();
+        let manager = Manager::open(&data).unwrap();
+        let h = Arc::new(Handle {
+            record: Mutex::new(new_record(id, Uuid::new_v4(), &plan, 0)),
+            control: AtomicU8::new(0),
+            working: AtomicBool::new(false),
+            parked: Mutex::new(None),
+        });
+        let gate = manager.launch_dispatch.lock().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let other = manager.clone();
+        let thread = thread::spawn(move || {
+            let mut live = Live::empty();
+            // The library test executable cannot serve the hidden collector command.
+            // Its preparation failure must be returned even while dispatch is busy.
+            let result = spawn(&other, &h, plan, &mut live);
+            sender.send(result.is_err()).unwrap();
+            h.record.lock().unwrap().status.request_stop();
+            stop_groups(&other.data, &h, &mut live).unwrap();
+        });
+        let prepared = receiver.recv_timeout(Duration::from_secs(3));
+        drop(gate);
+        thread.join().unwrap();
+        assert_eq!(prepared.unwrap(), true);
     }
 }
