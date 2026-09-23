@@ -30,7 +30,7 @@ jobs:
         run: cargo +stable test --locked --test m0 cli_smoke_node_python_and_explicit_native_manifest
       - name: Windows runtime boundary
         if: runner.os == 'Windows'
-        run: cargo +stable test --locked --test m1_platform --test m1_daemon_protocol
+        run: cargo +stable test --locked --test m1_platform --test m1_daemon_protocol --test m1_journal
       - name: macOS logging smoke
         if: runner.os == 'macOS'
         run: cargo +stable run --locked --example log_probe

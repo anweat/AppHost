@@ -3,6 +3,7 @@
 use super::{InstanceStatus, LaunchPlan, State, collector, retention};
 use crate::{
     Error, Result,
+    journal::{self, Actor, Event, Outcome},
     process::{self, Group},
     storage,
 };
@@ -23,6 +24,7 @@ use std::{
 };
 use uuid::Uuid;
 
+mod audit;
 mod worker;
 use worker::{Live, run};
 
@@ -70,6 +72,10 @@ pub struct Record {
     pub operation_done: bool,
     pub operation_error: Option<Value>,
     pub operation_result: Option<Value>,
+    #[serde(default)]
+    pub audit: Option<audit::Operation>,
+    #[serde(default)]
+    pub journal_pending: Vec<crate::journal::Event>,
     #[serde(default)]
     pub warnings: Vec<Value>,
     pub pending_mutation: Option<Mutation>,
@@ -122,8 +128,15 @@ fn log_path(data: &Path, r: &Record) -> PathBuf {
         .join(r.instance_id.to_string())
         .join("logs")
 }
-fn save_record(data: &Path, r: &Record) -> Result<()> {
-    storage::publish(&record_path(data, r.installation_id), &encode(r)?, true)
+fn save_record(data: &Path, r: &mut Record) -> Result<()> {
+    audit::complete(r);
+    storage::publish(&record_path(data, r.installation_id), &encode(r)?, true)?;
+    // The operation and its facts are durable first. Journal IO cannot revoke an
+    // accepted stop; pending facts are retried on later writes or daemon recovery.
+    if audit::flush(data, r) {
+        let _ = storage::publish(&record_path(data, r.installation_id), &encode(r)?, true);
+    }
+    Ok(())
 }
 fn new_record(id: Uuid, op: Uuid, plan: &LaunchPlan, epoch: u64) -> Record {
     Record {
@@ -135,6 +148,8 @@ fn new_record(id: Uuid, op: Uuid, plan: &LaunchPlan, epoch: u64) -> Record {
         operation_done: false,
         operation_error: None,
         operation_result: None,
+        audit: None,
+        journal_pending: Vec::new(),
         warnings: Vec::new(),
         pending_mutation: None,
         restart_after_stop: false,
@@ -205,6 +220,16 @@ fn load_records(data: &Path) -> Result<(Vec<Record>, Vec<Value>)> {
             || e.file_name() != format!("{}.json", r.installation_id).as_str()
             || r.services.is_empty()
             || r.services.len() > 32
+            || r.journal_pending.len() > 32
+            || r.journal_pending
+                .iter()
+                .any(|e| !e.valid() || e.installation_id != Some(r.installation_id))
+            || r.audit.as_ref().is_some_and(|a| {
+                !matches!(
+                    a.action.as_str(),
+                    "start" | "stop" | "restart" | "detach" | "relink"
+                )
+            })
             || r.services.iter().enumerate().any(|(i, s)| {
                 s.key != format!("s{i}")
                     || !(1000..=600000).contains(&s.startup_timeout_ms)
@@ -291,6 +316,12 @@ impl Manager {
         }
         let at = *r.failure_at_ms.get_or_insert_with(now);
         let fid = *r.failure_id.get_or_insert_with(Uuid::new_v4);
+        let mut observation = Event::new("runtime-failure", Actor::System, Outcome::Observed);
+        observation.event_id = format!("{fid}:failure");
+        observation.installation_id = Some(r.installation_id);
+        observation.instance_id = Some(r.instance_id);
+        observation.code = r.status.failure.clone();
+        audit::enqueue(&mut r, observation);
         let mut failure = crate::failure::Failure::new(
             r.installation_id,
             r.status.failure.as_deref().unwrap_or("UNKNOWN"),
@@ -317,7 +348,7 @@ impl Manager {
             log_incomplete: r.status.log_incomplete,
             recovered,
         };
-        if let Err(e) = save_record(&self.data, &r) {
+        if let Err(e) = save_record(&self.data, &mut r) {
             r.warnings.push(json!({"code":"FAILURE_CAPTURE_INCOMPLETE","level":"warning","title":"Failure reference was not saved","evidence":{"error_code":e.code}}));
         }
         drop(r);
@@ -412,9 +443,15 @@ impl Manager {
                 r.operation_epoch = wake.stop_epoch;
                 r.restart_after_stop = false;
                 if live.any() || r.management_uncertain || r.status.state() != State::Stopped {
+                    // Recovery completes StopAll's interrupted dispatch. Close the
+                    // previous operation before assigning a new system stop ID.
+                    audit::cancel(&mut r);
                     r.operation_id = Uuid::new_v4();
                     r.operation_done = false;
+                    r.operation_error = None;
+                    r.operation_result = None;
                     r.status.request_stop();
+                    audit::begin(&mut r, "stop", Actor::System);
                 }
             }
             if r.status.state() != State::Stopped
@@ -428,7 +465,7 @@ impl Manager {
                 }
                 r.operation_done = true;
             }
-            save_record(data, &r)?;
+            save_record(data, &mut r)?;
             let id = r.installation_id;
             let stopping = r.status.state() == State::Stopping
                 || (!r.operation_done && (r.pending_mutation.is_some() || r.restart_after_stop));
@@ -485,7 +522,7 @@ impl Manager {
                         if matches!(error.code.as_str(), "IO_ERROR" | "MANAGEMENT_UNCERTAIN") {
                             r.management_uncertain = true;
                         }
-                        let _ = save_record(&manager.data, &r);
+                        let _ = save_record(&manager.data, &mut r);
                     }
                     manager.capture_failure(&h, false);
                     let r = h.record.lock().unwrap();
@@ -518,8 +555,11 @@ impl Manager {
             json!({"live":true,"automatic_wake_paused":self.paused.load(Ordering::Acquire),"instances":records,"warnings":warnings}),
         )
     }
-    pub fn start(self: &Arc<Self>, id: Uuid) -> Result<Value> {
-        let result = self.start_inner(id);
+    pub fn start(self: &Arc<Self>, id: Uuid, actor: Actor) -> Result<Value> {
+        self.launch(id, actor, "start")
+    }
+    fn launch(self: &Arc<Self>, id: Uuid, actor: Actor, action: &str) -> Result<Value> {
+        let result = self.start_inner(id, actor, action);
         result.map_err(|mut error| {
             if matches!(
                 error.code.as_str(),
@@ -547,7 +587,7 @@ impl Manager {
             error
         })
     }
-    fn start_inner(self: &Arc<Self>, id: Uuid) -> Result<Value> {
+    fn start_inner(self: &Arc<Self>, id: Uuid, actor: Actor, action: &str) -> Result<Value> {
         let epoch = self.stop_epoch.load(Ordering::Acquire);
         if let Some(h) = self.handles.lock().unwrap().get(&id) {
             let r = h.record.lock().unwrap();
@@ -625,8 +665,12 @@ impl Manager {
         if let Some(old) = handles.get(&id) {
             retention::archive(&self.data, &old.record.lock().unwrap())?;
         }
-        let record = new_record(id, Uuid::new_v4(), &plan, epoch);
-        save_record(&self.data, &record)?;
+        let mut record = new_record(id, Uuid::new_v4(), &plan, epoch);
+        if let Some(old) = handles.get(&id) {
+            record.journal_pending = old.record.lock().unwrap().journal_pending.clone();
+        }
+        audit::begin(&mut record, action, actor);
+        save_record(&self.data, &mut record)?;
         let result = receipt(&record);
         let h = Arc::new(Handle {
             record: Mutex::new(record),
@@ -638,27 +682,28 @@ impl Manager {
         self.worker(h, Some(plan), Live::empty())?;
         Ok(result)
     }
-    pub fn stop(self: &Arc<Self>, id: Uuid, restart: bool) -> Result<Value> {
-        self.request_stop(id, restart, None)
+    pub fn stop(self: &Arc<Self>, id: Uuid, restart: bool, actor: Actor) -> Result<Value> {
+        self.request_stop(id, restart, None, actor)
     }
-    pub fn mutate(self: &Arc<Self>, id: Uuid, mutation: Mutation) -> Result<Value> {
+    pub fn mutate(self: &Arc<Self>, id: Uuid, mutation: Mutation, actor: Actor) -> Result<Value> {
         let handles = self.handles.lock().unwrap();
         if !handles.contains_key(&id) {
             return mutation.apply(&self.data, id);
         }
         drop(handles);
-        self.request_stop(id, false, Some(mutation))
+        self.request_stop(id, false, Some(mutation), actor)
     }
     fn request_stop(
         self: &Arc<Self>,
         id: Uuid,
         restart: bool,
         mutation: Option<Mutation>,
+        actor: Actor,
     ) -> Result<Value> {
         let h = self.handles.lock().unwrap().get(&id).cloned();
         let Some(h) = h else {
             return if restart {
-                self.start(id)
+                self.launch(id, actor, "restart")
             } else {
                 Ok(json!({"installation_id":id,"state":"STOPPED","operation_done":true}))
             };
@@ -684,6 +729,7 @@ impl Manager {
         {
             return Ok(receipt(&r));
         }
+        audit::cancel(&mut r);
         r.operation_id = Uuid::new_v4();
         r.operation_epoch = self.stop_epoch.load(Ordering::Acquire);
         r.operation_done = false;
@@ -692,7 +738,14 @@ impl Manager {
         r.status.request_stop();
         r.pending_mutation = mutation;
         r.restart_after_stop = restart;
-        save_record(&self.data, &r)?;
+        let action = match &r.pending_mutation {
+            Some(Mutation::Detach) => "detach",
+            Some(Mutation::Relink(_)) => "relink",
+            None if restart => "restart",
+            None => "stop",
+        };
+        audit::begin(&mut r, action, actor);
+        save_record(&self.data, &mut r)?;
         h.control
             .store(if restart { 2 } else { 1 }, Ordering::Release);
         let result = receipt(&r);
@@ -709,7 +762,7 @@ impl Manager {
         drop(r);
         Ok(result)
     }
-    pub fn stop_all(self: &Arc<Self>) -> Result<Value> {
+    pub fn stop_all(self: &Arc<Self>, actor: Actor) -> Result<Value> {
         // Persist before cancellation. Later explicit Start remains allowed;
         // only automatic wake is paused by this preference.
         let ids: Vec<_> = {
@@ -735,7 +788,7 @@ impl Manager {
                 // StopAll cancels the launch half of an accepted Restart.
                 if h.control.load(Ordering::Acquire) == 2 {
                     r.restart_after_stop = false;
-                    save_record(&self.data, &r)?;
+                    save_record(&self.data, &mut r)?;
                     h.control.store(1, Ordering::Release);
                 }
             }
@@ -743,12 +796,28 @@ impl Manager {
         };
         let results: Vec<_> = ids
             .into_iter()
-            .map(|id| match self.stop(id, false) {
+            .map(|id| match self.stop(id, false, actor) {
                 Ok(v) => v,
                 Err(e) => json!({"installation_id":id,"error":e}),
             })
             .collect();
         Ok(json!({"automatic_wake_paused":true,"results":results}))
+    }
+    pub fn resume_wake(&self) -> Result<Value> {
+        // Share StopAll's short gate: concurrent stop/resume follows persisted order.
+        let _handles = self.handles.lock().unwrap();
+        let epoch = self.stop_epoch.load(Ordering::Acquire);
+        storage::publish(
+            &self.data.join("wake.json"),
+            &encode(&Wake {
+                schema_version: 1,
+                paused: false,
+                stop_epoch: epoch,
+            })?,
+            true,
+        )?;
+        self.paused.store(false, Ordering::Release);
+        Ok(json!({"automatic_wake_paused":false}))
     }
     pub fn logs(
         &self,
@@ -785,7 +854,7 @@ impl Manager {
     }
 }
 fn receipt(r: &Record) -> Value {
-    json!({"installation_id":r.installation_id,"instance_id":r.instance_id,"operation_id":r.operation_id,"operation_done":r.operation_done,"state":r.status.state()})
+    json!({"installation_id":r.installation_id,"instance_id":r.instance_id,"operation_id":r.operation_id,"operation_done":r.operation_done,"state":r.status.state(),"warnings":r.warnings})
 }
 fn port_available(port: u16) -> Result<()> {
     // macOS permits a reusable wildcard bind beside a specific-address listener
@@ -804,6 +873,70 @@ fn port_available(port: u16) -> Result<()> {
 
 impl Manager {
     pub fn dispatch(self: &Arc<Self>, request: &crate::daemon::protocol::Request) -> Result<Value> {
+        let mut result = self.dispatch_inner(request);
+        if matches!(
+            request.method.as_str(),
+            "start" | "stop" | "restart" | "detach" | "relink" | "stop-all" | "resume-wake"
+        ) {
+            // Durable installation operations record acceptance and completion in
+            // save_record. Rejections, no-ops and global commands finish here.
+            let managed = result.as_ref().is_ok_and(|v| v["operation_id"].is_string());
+            if !managed {
+                let outcome = match &result {
+                    Err(_) => Outcome::Failed,
+                    Ok(v)
+                        if request.method == "stop-all"
+                            && v["results"]
+                                .as_array()
+                                .is_some_and(|a| a.iter().any(|v| !v["error"].is_null())) =>
+                    {
+                        Outcome::Failed
+                    }
+                    Ok(v)
+                        if request.method == "stop-all"
+                            && v["results"].as_array().is_some_and(|a| {
+                                a.iter().any(|v| v["operation_done"] == false)
+                            }) =>
+                    {
+                        Outcome::Accepted
+                    }
+                    Ok(_) => Outcome::Succeeded,
+                };
+                let mut event = Event::new(&request.method, request.actor, outcome);
+                event.installation_id = request.params["installation_id"]
+                    .as_str()
+                    .and_then(|s| Uuid::parse_str(s).ok());
+                if let Err(e) = &result {
+                    event.code = Some(e.code.clone());
+                }
+                match journal::append(&self.data, &event) {
+                    Ok(()) => match &mut result {
+                        Ok(v) => v["journal_event_id"] = json!(event.event_id),
+                        Err(e) => {
+                            if !e.details.is_object() {
+                                e.details = json!({"evidence":e.details});
+                            }
+                            e.details["journal_event_id"] = json!(event.event_id);
+                        }
+                    },
+                    Err(error) => match &mut result {
+                        Ok(v) => journal::add_warning(v, journal::warning(&error)),
+                        Err(e) => {
+                            if !e.details.is_object() {
+                                e.details = json!({"evidence":e.details});
+                            }
+                            journal::add_warning(&mut e.details, journal::warning(&error));
+                        }
+                    },
+                }
+            }
+        }
+        result
+    }
+    fn dispatch_inner(
+        self: &Arc<Self>,
+        request: &crate::daemon::protocol::Request,
+    ) -> Result<Value> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Installation {
@@ -840,18 +973,24 @@ impl Manager {
                 .map_err(|_| Error::new("INVALID_PARAMS", "Invalid runtime method parameters"))
         }
         match request.method.as_str() {
-            "start" => self.start(params::<Installation>(&request.params)?.installation_id),
+            "start" => self.start(
+                params::<Installation>(&request.params)?.installation_id,
+                request.actor,
+            ),
             "stop" => self.stop(
                 params::<Installation>(&request.params)?.installation_id,
                 false,
+                request.actor,
             ),
             "restart" => self.stop(
                 params::<Installation>(&request.params)?.installation_id,
                 true,
+                request.actor,
             ),
             "detach" => self.mutate(
                 params::<Installation>(&request.params)?.installation_id,
                 Mutation::Detach,
+                request.actor,
             ),
             "relink" => {
                 let p = params::<Relink>(&request.params)?;
@@ -861,16 +1000,33 @@ impl Manager {
                         "Relink requires an absolute project path",
                     ));
                 }
-                self.mutate(p.installation_id, Mutation::Relink(p.path))
+                self.mutate(p.installation_id, Mutation::Relink(p.path), request.actor)
             }
             "status" => self.status(params::<Status>(&request.params)?.installation_id),
             "stop-all" if request.params.as_object().is_some_and(|p| p.is_empty()) => {
-                self.stop_all()
+                self.stop_all(request.actor)
             }
             "stop-all" => Err(Error::new(
                 "INVALID_PARAMS",
                 "stop-all accepts no parameters",
             )),
+            "resume-wake" if request.params.as_object().is_some_and(|p| p.is_empty()) => {
+                self.resume_wake()
+            }
+            "resume-wake" => Err(Error::new(
+                "INVALID_PARAMS",
+                "resume-wake accepts no parameters",
+            )),
+            "journal" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Query {
+                    cursor: Option<String>,
+                    limit: Option<usize>,
+                }
+                let p = params::<Query>(&request.params)?;
+                journal::read(&self.data, p.cursor.as_deref(), p.limit.unwrap_or(100))
+            }
             "logs" => {
                 let p = params::<Logs>(&request.params)?;
                 self.logs(

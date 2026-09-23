@@ -135,7 +135,7 @@ macOS 入口为 `apphost daemon serve`，以前台进程承载 daemon，便于 C
 
 data-dir 先规范化，复用私有目录规则。`daemon.lock` 使用独占 OS 文件锁，锁持有期覆盖 listener 生命周期；`daemon.sock` 权限为 600。只有拿到锁后才能处理旧 socket，活动 listener、非 socket 文件和符号链接均不覆盖。macOS socket 完整路径必须少于 104 字节，超限报 SOCKET_PATH_TOO_LONG 并提示选择较短的数据目录，不另设隐藏端点。服务端和客户端均通过 getpeereid 校验对端有效 UID 与当前用户相同；握手回传规范化 data-dir，客户端再次核对。
 
-协议版本为 1。请求 request_id 为非空、最多 128 字节的可见 ASCII 字符串，method 最多 64 字节，params 必须为对象；拒绝未知信封字段。短 RPC 每连接一条请求和一条响应，然后关闭；后续订阅使用单独连接。请求正文最多 64 KiB、响应正文最多 1 MiB，以换行结束；不完整帧、无效 UTF-8/JSON、大小超限明确失败。响应携带 version 和 request_id，以及 result 或 error 二者之一；无法识别请求时 request_id 为 null。版本不兼容返回 PROTOCOL_VERSION_UNSUPPORTED，不静默降级。
+协议版本为 1。请求 request_id 为非空、最多 128 字节的可见 ASCII 字符串，method 最多 64 字节，params 必须为对象；可选 actor 仅接受 human / agent / system，缺省为 human，拒绝其他未知信封字段。actor 只标明自报归属，不改变权限；CLI 从 APPHOST_ACTOR 读取，非法值在修改或拉起 daemon 前返回 INVALID_ACTOR。短 RPC 每连接一条请求和一条响应，然后关闭；后续订阅使用单独连接。请求正文最多 64 KiB、响应正文最多 1 MiB，以换行结束；不完整帧、无效 UTF-8/JSON、大小超限明确失败。响应携带 version 和 request_id，以及 result 或 error 二者之一；无法识别请求时 request_id 为 null。版本不兼容返回 PROTOCOL_VERSION_UNSUPPORTED，不静默降级。
 
 同时最多接纳 16 个 RPC，超额连接立即关闭；客户端收到 DAEMON_UNAVAILABLE，可显式重试。单次请求读取和响应写入各有 2 秒绝对期限，缓慢逐字节发送不能刷新期限。阻塞的文件预检在有限工作线程中执行，不占用接受连接的主循环；无请求时主循环阻塞等待，不轮询。
 
@@ -161,6 +161,8 @@ Stop All 先在版本化 wake.json 中一并持久化 automatic_wake_paused 和�
 
 wake.json 缺失且存在运行记录时，以最大 operation_epoch 加一恢复取消代数并保持自动唤醒暂停，取消未完成的重启后半段，继续已持久化的停止意图，保留正常运行的服务。先逐条保存统一代数和取消后的意图，最后发布 wake.json；中途再次崩溃时仍按缺失文件恢复，不将此次归一化解释成 Stop All。没有运行记录时初始化为未暂停、代数 0。代数溢出、已有文件损坏或版本不支持仍明确报错，不猜测内容。
 
+显式 `resume-wake` 不接受参数；与 Stop All 共用短写入门，持久化 automatic_wake_paused=false，保留当前取消代数，不重放已取消的启动、不启动任何 App。daemon 离线时允许拉起以完成这次显式操作。显式 start 仍不等同于恢复自动唤醒。
+
 活动或有运行历史的安装，CLI 的 detach / relink 经 daemon 协调；离线时先拉起并对账。协调请求成功停止后才调用 L0 登记写入，长操作的登记结果位于 operation_result。无 daemon、无运行记录的 M0 登记操作仍使用原 L0 入口和回执。批量 detach 在提交任何停止前核验所有安装 ID，并去重，未知 ID 不产生部分停止或登记写入。relink 的 RPC 路径必须是绝对路径，由 CLI 在发送前规范化；停止旧实例不依赖当前源码或清单仍可读取。
 
 ### 实例日志读取与普通归档
@@ -185,7 +187,7 @@ daemon 使用一条独立的有界采集队列（64 项），最多保留 32 个
 
 运行状态仅 STOPPED / STARTING / RUNNING / STOPPING / FAILED；就绪、退出原因和 management_uncertain 为附加信息。操作 ID 用来关联长请求，不另建持久化任务状态机。
 
-请求采用 JSON Lines：`{version, request_id, method, params}`；响应回显 request_id，成功返回 result，错误返回沿用 M0 的 `{error:{code,message,details}}`。长操作返回 operation_id 后通过状态查询/事件获得结果；断连不取消已接受的操作。事件游标与快照绑定，过期游标要求重新读取快照。
+请求采用 JSON Lines：`{version, request_id, method, params, actor?}`；响应回显 request_id，成功返回 result，错误返回沿用 M0 的 `{error:{code,message,details}}`。长操作返回 operation_id 后通过状态查询/事件获得结果；断连不取消已接受的操作。事件游标与快照绑定，过期游标要求重新读取快照。
 
 | 方法 | 输入 | 行为 |
 |---|---|---|
@@ -197,9 +199,24 @@ daemon 使用一条独立的有界采集队列（64 项），最多保留 32 个
 | url | installation_id | 只读解析稳定入口，不拉起 daemon 或 App |
 | failure | installation_id、failure_id 可选 | 返回结构化失败、证据和现场完整性 |
 | stop-all | 无 | 暂停自动唤醒、取消待启动、停止所有活动服务，返回逐项结果 |
+| resume-wake | 无 | 显式解除自动唤醒暂停，不启动 App、不改变取消代数 |
 | journal | cursor、limit | 有界读取操作日志 |
 
 网关固定端口、浏览器唤醒条件和 Windows Job 生命周期按阶段稿的验证要求确定；这里不先定义兼容回退组合。平台未支持能力明确返回 UNSUPPORTED_PLATFORM。
+
+### 操作日志
+
+操作事实保存在 `<data>/journal/<十进制段号>.jsonl`，独立于 stdout/stderr、失败现场和未来的实时事件订阅。每行版本为 1，字段为 event_id、at_ms（Unix 毫秒）、action、actor、installation_id、instance_id、operation_id、outcome、code；不适用的身份为 null。只记录身份、动作和结果码，不复制命令、环境值、路径、标签正文或原始输出。发起者随长操作保存，daemon 重启不将原来的 agent 操作改成 human。
+
+outcome 为 accepted / succeeded / failed / canceled / observed。运行操作发布意图时记 accepted，真正完成后记最终结果；重复 start 合并同一操作，不重复生成接受记录。完整 restart 保持同一 operation_id，接受记录关联旧实例，成功记录关联新实例。新停止请求取消尚未完成的启动时，先记旧操作 canceled，再记停止 accepted。已经成功进入 RUNNING 后发生故障，新增 system 的 runtime-failure / observed 事实，不改写先前启动成功的结论。Stop All 的全局记录表示逐项停止是否已接受，有未完成项时为 accepted，最终结果通过逐安装操作关联；不创建额外的全局任务状态机。恢复补发停止时，保留原操作取消事实，新停止归属 system。
+
+L0 写操作由 CLI 应用层读取核心回执后记结果；部分批量成功按 completed 中的安装逐条记录，再记本次失败，不把失败项记为成功。daemon 已返回 operation_id 或 journal_event_id 的回执不在 CLI 重复记录。因显式运行命令拉起 daemon 时，另外记录 daemon-start 的就绪结果。只读命令不新增操作日志、不拉起 daemon。
+
+每段至多 1 MiB、稳定状态最多 8 段，写入时清理整段过期数据及超额最老段；保留最近 30 天且受 8 MiB 总容量约束，容量先达到时提前淘汰，不能声称完整 30 天。轮转发布与清理之间崩溃可临时有第 9 段，下次写入先恢复容量。跨进程读写使用独立文件锁，至多等待 200 ms；目录枚举最多 256 项，每行至多 4096 字节。不认识的名称跳过；合法段名的损坏内容、符号链接或非普通文件明确报错，未完成尾行不静默截断。
+
+CLI `journal [--cursor <event_id>] [--limit <1..200>] [--json]` 和同名 RPC 返回 `{events, next_cursor, has_more}`；limit 默认 100，按追加顺序读取，cursor 指最后读到的事件 ID。游标被轮转或时间留存淘汰时返回 JOURNAL_CURSOR_EXPIRED，调用方重新读取；无日志时返回空数组，不创建目录。读取不做清理，也不把日志游标用作实时订阅游标。
+
+运行快照先原子保存业务结果与待补事实，再尝试追加日志；每安装待补最多 32 条，在后续状态保存或 daemon 对账时重试，以稳定 event_id 去重。同一 event_id 的事实内容冲突时返回 JOURNAL_CONFLICT，不覆盖旧记录。写入失败通过 warnings 的 JOURNAL_WRITE_FAILED 标明，补齐后清除；超过待补上限另保留 JOURNAL_INCOMPLETE，说明无法补回的历史缺口。日志故障不能阻止已接受的停止，也不能把业务成功改为失败。离线 L0 写入不另建重试队列，日志失败在当次回执中说明缺口。保持 M0 对象或数组回执形状；错误的警告附在 error.details.warnings，成功命令不向 stderr 输出文本警告。
 
 
 ## 桌面端交互适配（设计契约）

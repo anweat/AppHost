@@ -194,6 +194,140 @@ fn free_port() -> u16 {
 }
 
 #[test]
+fn journal_separates_acceptance_completion_and_cancellation_with_persisted_actor() {
+    let mut f = Fixture::new();
+    let id = f.register(json!({}), None, false);
+    f.boot();
+    let started = Command::new(env!("CARGO_BIN_EXE_apphost"))
+        .arg("--data-dir")
+        .arg(&f.data)
+        .env("APPHOST_ACTOR", "agent")
+        .args(["start", &id.to_string()])
+        .output()
+        .unwrap();
+    assert!(started.status.success(), "{:?}", started);
+    assert!(started.stderr.is_empty());
+    let accepted: Value = serde_json::from_slice(&started.stdout).unwrap();
+    let operation = accepted["operation_id"].clone();
+    assert_eq!(accepted["operation_done"], false);
+    f.until(id, "RUNNING");
+    assert_eq!(
+        f.rpc("start", json!({"installation_id":id}))["operation_id"],
+        operation
+    );
+    f.crash();
+    f.boot();
+    f.until(id, "RUNNING");
+    let page = f.rpc("journal", json!({"limit":200}));
+    let facts: Vec<_> = page["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["operation_id"] == operation)
+        .collect();
+    assert_eq!(facts.len(), 2, "{page}");
+    assert_eq!(facts[0]["outcome"], "accepted");
+    assert_eq!(facts[1]["outcome"], "succeeded");
+    assert!(facts.iter().all(|e| e["actor"] == "agent"));
+    f.rpc("stop", json!({"installation_id":id}));
+    f.until(id, "STOPPED");
+    let pending = f.rpc("start", json!({"installation_id":id}));
+    let stopped = f.rpc("stop", json!({"installation_id":id}));
+    f.until(id, "STOPPED");
+    let page = f.rpc("journal", json!({}));
+    assert!(
+        page["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["operation_id"] == pending["operation_id"] && e["outcome"] == "canceled")
+    );
+    assert!(
+        page["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["operation_id"] == stopped["operation_id"] && e["outcome"] == "succeeded")
+    );
+}
+
+#[test]
+fn broken_journal_does_not_block_stop_and_pending_facts_replay_once_after_repair() {
+    let mut f = Fixture::new();
+    let id = f.register(json!({}), None, false);
+    fs::write(f.data.join("journal"), b"unrelated file").unwrap();
+    f.boot();
+    let started = f.rpc("start", json!({"installation_id":id}));
+    assert_eq!(started["warnings"][0]["code"], "JOURNAL_WRITE_FAILED");
+    f.until(id, "RUNNING");
+    f.rpc("stop", json!({"installation_id":id}));
+    f.until(id, "STOPPED");
+    f.crash();
+    let path = f.data.join("runtime").join(format!("{id}.json"));
+    let r: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(r["journal_pending"].as_array().unwrap().len(), 4);
+    fs::remove_file(f.data.join("journal")).unwrap();
+    f.boot();
+    let first = apphost::journal::read(&f.data, None, 100).unwrap();
+    assert_eq!(first["events"].as_array().unwrap().len(), 4, "{first}");
+    f.crash();
+    f.boot();
+    assert_eq!(apphost::journal::read(&f.data, None, 100).unwrap(), first);
+}
+
+#[test]
+fn resume_wake_only_clears_pause_and_survives_daemon_restart() {
+    let mut f = Fixture::new();
+    let id = f.register(json!({}), None, false);
+    f.boot();
+    f.rpc("start", json!({"installation_id":id}));
+    f.until(id, "RUNNING");
+    f.rpc("stop-all", json!({}));
+    f.until(id, "STOPPED");
+    let before: Value =
+        serde_json::from_slice(&fs::read(f.data.join("wake.json")).unwrap()).unwrap();
+    assert_eq!(
+        f.rpc("resume-wake", json!({}))["automatic_wake_paused"],
+        false
+    );
+    let after: Value =
+        serde_json::from_slice(&fs::read(f.data.join("wake.json")).unwrap()).unwrap();
+    assert_eq!(before["stop_epoch"], after["stop_epoch"]);
+    assert_eq!(after["paused"], false);
+    assert_eq!(f.state(id)["status"]["state"], "STOPPED");
+    f.crash();
+    f.boot();
+    assert_eq!(f.rpc("status", json!({}))["automatic_wake_paused"], false);
+    assert_eq!(f.state(id)["status"]["state"], "STOPPED");
+    assert!(
+        f.rpc("journal", json!({}))["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["action"] == "resume-wake" && e["outcome"] == "succeeded")
+    );
+}
+
+#[test]
+fn restart_without_history_preserves_requested_action_in_journal() {
+    let mut f = Fixture::new();
+    let id = f.register(json!({}), None, false);
+    f.boot();
+    let accepted = f.rpc("restart", json!({"installation_id":id}));
+    f.until(id, "RUNNING");
+    let page = f.rpc("journal", json!({}));
+    let facts: Vec<_> = page["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["operation_id"] == accepted["operation_id"])
+        .collect();
+    assert_eq!(facts.len(), 2);
+    assert!(facts.iter().all(|e| e["action"] == "restart"));
+    assert_eq!(facts[1]["outcome"], "succeeded");
+}
+
+#[test]
 fn failure_evidence_is_retained_redacted_and_does_not_delay_stop() {
     let mut f = Fixture::new();
     let id = f.register(
@@ -259,7 +393,12 @@ fn preflight_port_failure_has_no_instance_and_survives_without_a_worker() {
     let error = daemon::call(&f.data, "start", json!({"installation_id":id}), false).unwrap_err();
     assert_eq!(error.code, "PORT_IN_USE");
     assert!(error.details["failure_id"].is_string());
-    wait(|| apphost::failure::read(&f.data, id, None).is_ok());
+    // A successful read can still mean no retained failure yet; the recorder is
+    // asynchronous, so wait for this incident instead of racing its first save.
+    wait(|| {
+        apphost::failure::read(&f.data, id, None)
+            .is_ok_and(|v| v["failure"]["failure_id"] == error.details["failure_id"])
+    });
     let evidence = f.rpc("failure", json!({"installation_id":id}));
     assert_eq!(evidence["failure"]["instance_id"], Value::Null);
     assert_eq!(evidence["failure"]["evidence"]["code"], "PORT_IN_USE");
@@ -327,6 +466,26 @@ fn collector_failure_preserves_service_until_explicit_stop() {
     let failed = f.until(id, "FAILED");
     assert_eq!(failed["status"]["log_incomplete"], true);
     assert_eq!(failed["services"][0]["alive"], true);
+    wait(|| {
+        apphost::journal::read(&f.data, None, 100).unwrap()["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| {
+                e["action"] == "runtime-failure"
+                    && e["outcome"] == "observed"
+                    && e["actor"] == "system"
+            })
+    });
+    let page = apphost::journal::read(&f.data, None, 100).unwrap();
+    let completed: Vec<_> = page["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["operation_id"] == old["operation_id"] && e["outcome"] != "accepted")
+        .collect();
+    assert_eq!(completed.len(), 1);
+    assert_eq!(completed[0]["outcome"], "succeeded");
     assert_eq!(
         daemon::call(&f.data, "start", json!({"installation_id":id}), false)
             .unwrap_err()
@@ -587,6 +746,14 @@ fn cli_explicit_start_bootstraps_daemon_and_read_only_status_does_not() {
     }
     let _cleanup = Cleanup(pid);
     f.until(id, "RUNNING");
+    let journal = apphost::journal::read(&f.data, None, 100).unwrap();
+    assert!(
+        journal["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["action"] == "daemon-start" && e["outcome"] == "succeeded")
+    );
     assert!(cli(&["stop-all"]).status.success());
     f.until(id, "STOPPED");
 }
@@ -627,10 +794,19 @@ fn stopping_intent_survives_daemon_crash() {
     f.boot();
     f.rpc("start", json!({"installation_id":id}));
     f.until(id, "RUNNING");
-    f.rpc("stop", json!({"installation_id":id}));
+    let stopped = f.rpc("stop", json!({"installation_id":id}));
     f.crash();
     f.boot();
     f.until(id, "STOPPED");
+    let journal = apphost::journal::read(&f.data, None, 100).unwrap();
+    let events: Vec<_> = journal["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["operation_id"] == stopped["operation_id"])
+        .collect();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1]["outcome"], "succeeded");
 }
 #[test]
 fn immediate_exit_is_observed_without_losing_process_group_identity() {
@@ -747,6 +923,20 @@ fn stop_all_global_intent_survives_a_crash_before_individual_records_are_updated
     let stopped = f.until(id, "STOPPED");
     assert_eq!(stopped["instance_id"], original["instance_id"]);
     assert_eq!(stopped["restart_after_stop"], false);
+    let page = apphost::journal::read(&f.data, None, 100).unwrap();
+    let recovered: Vec<_> = page["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["operation_id"] == stopped["operation_id"])
+        .collect();
+    assert_eq!(recovered.len(), 2);
+    assert!(
+        recovered
+            .iter()
+            .all(|e| e["actor"] == "system" && e["action"] == "stop")
+    );
+    assert_eq!(recovered[1]["outcome"], "succeeded");
     // A later explicit Start is still allowed without unpausing automatic wake.
     f.rpc("start", json!({"installation_id":id}));
     let started = f.until(id, "RUNNING");

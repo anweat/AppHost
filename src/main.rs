@@ -39,6 +39,17 @@ enum Command {
     },
     /// Pause automatic wake and stop all managed instances.
     StopAll,
+    /// Re-enable automatic wake without starting any App.
+    ResumeWake,
+    /// Read operation facts without starting the daemon.
+    Journal {
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
     /// Read a bounded observation window from the current instance.
     Logs {
         installation_id: Uuid,
@@ -205,6 +216,59 @@ fn data_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
 }
 
 fn run(cli: Cli) -> Result<Option<Value>> {
+    let action = match &cli.command {
+        Command::Import { .. } => Some("import"),
+        Command::Label { .. } => Some("label"),
+        Command::Detach { .. } => Some("detach"),
+        Command::Relink { .. } => Some("relink"),
+        Command::Retention { .. } => Some("retention"),
+        Command::Associate { .. } => Some("associate"),
+        Command::Environment {
+            command: EnvironmentCommand::SetPath { .. },
+        } => Some("environment-set-path"),
+        Command::Environment {
+            command: EnvironmentCommand::Capture { .. },
+        } => Some("environment-capture"),
+        _ => None,
+    };
+    if let Some(action) = action {
+        let installation = match &cli.command {
+            Command::Label {
+                installation_id, ..
+            }
+            | Command::Retention {
+                installation_id, ..
+            }
+            | Command::Relink {
+                installation_id, ..
+            }
+            | Command::Associate {
+                installation_id, ..
+            } => Some(*installation_id),
+            Command::Detach { installation_ids } if installation_ids.len() == 1 => {
+                Some(installation_ids[0])
+            }
+            _ => None,
+        };
+        let actor = apphost::journal::Actor::from_environment()?;
+        let data = data_dir(cli.data_dir.clone())?;
+        let result = run_command(cli);
+        return match result {
+            Ok(Some(value)) => {
+                apphost::journal::record_result(&data, action, actor, installation, Ok(value))
+                    .map(Some)
+            }
+            Err(error) => {
+                apphost::journal::record_result(&data, action, actor, installation, Err(error))
+                    .map(Some)
+            }
+            Ok(None) => Ok(None),
+        };
+    }
+    run_command(cli)
+}
+
+fn run_command(cli: Cli) -> Result<Option<Value>> {
     // Read-only project commands don't need an available home or writable registry.
     let result = match cli.command {
         Command::InternalCollect { root, descriptors } => {
@@ -251,6 +315,14 @@ fn run(cli: Cli) -> Result<Option<Value>> {
         Command::StopAll => {
             apphost::daemon::call(&data_dir(cli.data_dir)?, "stop-all", json!({}), true)
         }
+        Command::ResumeWake => {
+            apphost::daemon::call(&data_dir(cli.data_dir)?, "resume-wake", json!({}), true)
+        }
+        Command::Journal {
+            cursor,
+            limit,
+            json: _,
+        } => apphost::journal::read(&data_dir(cli.data_dir)?, cursor.as_deref(), limit),
         Command::Logs {
             installation_id,
             instance_id,

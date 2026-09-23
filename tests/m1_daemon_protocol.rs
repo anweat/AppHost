@@ -6,6 +6,27 @@ fn request() -> Value {
 }
 
 #[test]
+fn actor_is_an_optional_strict_attribution_not_an_authority() {
+    use apphost::journal::Actor;
+    let decode = |v: &Value| protocol::decode(&serde_json::to_vec(v).unwrap());
+    assert_eq!(decode(&request()).unwrap().actor, Actor::Human);
+    for (name, actor) in [
+        ("human", Actor::Human),
+        ("agent", Actor::Agent),
+        ("system", Actor::System),
+    ] {
+        let mut v = request();
+        v["actor"] = json!(name);
+        assert_eq!(decode(&v).unwrap().actor, actor);
+    }
+    for bad in [json!("admin"), json!("Agent"), json!(null), json!(1)] {
+        let mut v = request();
+        v["actor"] = bad;
+        assert_eq!(decode(&v).unwrap_err().code, "INVALID_REQUEST");
+    }
+}
+
+#[test]
 fn envelopes_reject_unknown_fields_bad_types_and_unbounded_ids() {
     for (field, value) in [
         ("extra", json!(true)),

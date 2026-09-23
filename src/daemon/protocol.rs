@@ -16,6 +16,8 @@ pub struct Request {
     pub request_id: String,
     pub method: String,
     pub params: Value,
+    #[serde(default, skip_serializing_if = "crate::journal::Actor::is_human")]
+    pub actor: crate::journal::Actor,
 }
 
 pub fn decode(bytes: &[u8]) -> Result<Request> {

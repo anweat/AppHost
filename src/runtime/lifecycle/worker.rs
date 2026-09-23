@@ -107,7 +107,7 @@ fn spawn(manager: &Manager, h: &Handle, plan: LaunchPlan, live: &mut Live) -> Re
         let mut r = h.record.lock().unwrap();
         r.collector_attempted = true;
         r.collector_alive = true;
-        save_record(data, &r)?;
+        save_record(data, &mut r)?;
     }
     let pipes = collector::spawn(&root, count);
     let mut pipes = match pipes {
@@ -126,7 +126,7 @@ fn spawn(manager: &Manager, h: &Handle, plan: LaunchPlan, live: &mut Live) -> Re
     {
         let mut r = h.record.lock().unwrap();
         r.collector = live.collector.clone();
-        save_record(data, &r)?;
+        save_record(data, &mut r)?;
     }
     collector::ready(live.collector_child.as_mut().unwrap())?;
     live.groups = (0..count).map(|_| None).collect();
@@ -145,7 +145,7 @@ fn spawn(manager: &Manager, h: &Handle, plan: LaunchPlan, live: &mut Live) -> Re
                 break;
             }
             r.services[i].spawn_attempted = true;
-            save_record(data, &r)?;
+            save_record(data, &mut r)?;
             let child = process::spawn_group(
                 service
                     .into_command()
@@ -167,7 +167,7 @@ fn spawn(manager: &Manager, h: &Handle, plan: LaunchPlan, live: &mut Live) -> Re
             live.groups[i] = Some(Group::capture_spawned(live.children[i].as_ref().unwrap())?);
             r.services[i].group = live.groups[i].clone();
             r.services[i].alive = true;
-            save_record(data, &r)?;
+            save_record(data, &mut r)?;
         }
         Ok(())
     })
@@ -235,7 +235,7 @@ fn stop_groups(data: &Path, h: &Handle, live: &mut Live) -> Result<bool> {
             json!({"code":"STOP_FAILED","groups":errors,"management_uncertain":r.management_uncertain}),
         );
     }
-    save_record(data, &r)?;
+    save_record(data, &mut r)?;
     Ok(r.status.state() == State::Stopped)
 }
 pub(super) fn run(
@@ -261,7 +261,7 @@ pub(super) fn run(
                 if error.code == "MANAGEMENT_UNCERTAIN" {
                     r.management_uncertain = true;
                 }
-                save_record(&manager.data, &r)?;
+                save_record(&manager.data, &mut r)?;
             }
         }
         let control = h.control.load(Ordering::Acquire);
@@ -278,7 +278,7 @@ pub(super) fn run(
                     }
                 }
                 r.operation_done = !(control == 2 && restart_still_requested);
-                save_record(&manager.data, &r)?;
+                save_record(&manager.data, &mut r)?;
             } else {
                 let mut r = h.record.lock().unwrap();
                 r.pending_mutation = None;
@@ -331,8 +331,12 @@ pub(super) fn run(
                 {
                     let mut r = h.record.lock().unwrap();
                     retention::archive(&manager.data, &r)?;
+                    let operation = r.audit.take();
+                    let pending = std::mem::take(&mut r.journal_pending);
                     *r = new_record(id, op, &prepared, epoch);
-                    save_record(&manager.data, &r)?;
+                    r.audit = operation;
+                    r.journal_pending = pending;
+                    save_record(&manager.data, &mut r)?;
                 }
                 drop(handles);
                 *live = Live::empty();
@@ -495,7 +499,7 @@ pub(super) fn run(
             }
             if encode(&*r)? != before {
                 r.updated_at_ms = now();
-                save_record(&manager.data, &r)?;
+                save_record(&manager.data, &mut r)?;
             }
         }
         manager.capture_failure(h, false);

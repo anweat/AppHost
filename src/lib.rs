@@ -3,6 +3,7 @@ pub mod discovery;
 pub mod environment;
 pub mod failure;
 mod git_metadata;
+pub mod journal;
 mod launch;
 pub mod logs;
 pub mod manifest;

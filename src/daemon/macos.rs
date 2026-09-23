@@ -356,7 +356,7 @@ pub(super) fn serve(data_dir: &Path) -> Result<()> {
     let manager = crate::runtime::lifecycle::Manager::open(&data_dir)?;
     let hello = Arc::new(
         json!({"protocol_version":protocol::VERSION,"daemon_id":Uuid::new_v4(),
-        "pid":std::process::id(),"data_dir":*data_dir,"capabilities":["hello","check-launch","start","stop","restart","status","stop-all","logs","detach","relink","failure"]}),
+        "pid":std::process::id(),"data_dir":*data_dir,"capabilities":["hello","check-launch","start","stop","restart","status","stop-all","logs","detach","relink","failure","journal","resume-wake"]}),
     );
     let clients = Arc::new(AtomicUsize::new(0));
     for stream in endpoint.listener.incoming() {
@@ -408,8 +408,17 @@ fn rpc(data_dir: &Path, method: &str, params: Value) -> Result<Value> {
     }
     let mut stream = connect(&path)?;
     let id = Uuid::new_v4().to_string();
-    let request =
+    let mut request =
         json!({"version":protocol::VERSION,"request_id":id,"method":method,"params":params});
+    if matches!(
+        method,
+        "start" | "stop" | "restart" | "detach" | "relink" | "stop-all" | "resume-wake"
+    ) {
+        let actor = crate::journal::Actor::from_environment()?;
+        if !actor.is_human() {
+            request["actor"] = json!(actor);
+        }
+    }
     write_frame(
         &mut stream,
         &protocol::encode(&request, protocol::MAX_REQUEST)?,
@@ -466,42 +475,61 @@ pub(super) fn check_launch(data_dir: &Path, installation_id: Uuid) -> Result<Val
 }
 
 pub(super) fn call(data_dir: &Path, method: &str, params: Value, autostart: bool) -> Result<Value> {
+    // Reject bad attribution before a mutating call can create storage or a daemon.
+    let actor = if autostart
+        || matches!(
+            method,
+            "start" | "stop" | "restart" | "detach" | "relink" | "stop-all" | "resume-wake"
+        ) {
+        crate::journal::Actor::from_environment()?
+    } else {
+        crate::journal::Actor::Human
+    };
+    let mut startup_warnings = Vec::new();
     if autostart {
         storage::private_directory(data_dir)?;
         if let Err(error) = ping(data_dir) {
             if error.code != "DAEMON_UNAVAILABLE" {
                 return Err(error);
             }
-            use std::os::unix::process::CommandExt;
-            let mut child = std::process::Command::new(
-                std::env::current_exe().map_err(|e| storage::io_error(data_dir, e))?,
-            )
-            .arg("--data-dir")
-            .arg(data_dir)
-            .args(["daemon", "serve"])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .process_group(0)
-            .spawn()
-            .map_err(|e| storage::io_error(data_dir, e))?;
-            let deadline = Instant::now() + Duration::from_secs(5);
-            loop {
-                if ping(data_dir).is_ok() {
-                    break;
+            let launch = (|| {
+                use std::os::unix::process::CommandExt;
+                let mut child = std::process::Command::new(
+                    std::env::current_exe().map_err(|e| storage::io_error(data_dir, e))?,
+                )
+                .arg("--data-dir")
+                .arg(data_dir)
+                .args(["daemon", "serve"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .process_group(0)
+                .spawn()
+                .map_err(|e| storage::io_error(data_dir, e))?;
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    if ping(data_dir).is_ok() {
+                        break;
+                    }
+                    if child
+                        .try_wait()
+                        .map_err(|e| storage::io_error(data_dir, e))?
+                        .is_some()
+                        || Instant::now() >= deadline
+                    {
+                        return Err(Error::new(
+                            "DAEMON_UNAVAILABLE",
+                            "Daemon did not become ready; run daemon serve to inspect its startup error",
+                        ));
+                    }
+                    thread::sleep(Duration::from_millis(20));
                 }
-                if child
-                    .try_wait()
-                    .map_err(|e| storage::io_error(data_dir, e))?
-                    .is_some()
-                    || Instant::now() >= deadline
-                {
-                    return Err(Error::new(
-                        "DAEMON_UNAVAILABLE",
-                        "Daemon did not become ready; run daemon serve to inspect its startup error",
-                    ));
-                }
-                thread::sleep(Duration::from_millis(20));
+                Ok(json!({}))
+            })();
+            let recorded =
+                crate::journal::record_result(data_dir, "daemon-start", actor, None, launch)?;
+            if let Some(warnings) = recorded["warnings"].as_array() {
+                startup_warnings.extend(warnings.iter().cloned());
             }
         }
     }
@@ -518,7 +546,19 @@ pub(super) fn call(data_dir: &Path, method: &str, params: Value, autostart: bool
             "Daemon does not advertise this method",
         ));
     }
-    rpc(&data_dir, method, params)
+    let mut result = rpc(&data_dir, method, params);
+    for warning in startup_warnings {
+        match &mut result {
+            Ok(v) => crate::journal::add_warning(v, warning),
+            Err(e) => {
+                if !e.details.is_object() {
+                    e.details = json!({"evidence":e.details});
+                }
+                crate::journal::add_warning(&mut e.details, warning);
+            }
+        }
+    }
+    result
 }
 
 #[cfg(test)]
