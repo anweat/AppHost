@@ -6,12 +6,16 @@
   <meta name="color-scheme" content="light dark">
   <title>AppHost · M1 交互设计</title>
   <link rel="stylesheet" href="styles.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 64 64%27%3E%3Crect x=%278%27 y=%278%27 width=%2748%27 height=%2748%27 rx=%2715%27 fill=%27none%27 stroke=%27%23176557%27 stroke-width=%276%27 stroke-linecap=%27round%27 pathLength=%27100%27 stroke-dasharray=%279 18 73 0%27/%3E%3Ccircle cx=%2751.6%27 cy=%2712.4%27 r=%275%27 fill=%27%232fbf85%27/%3E%3Crect x=%2720%27 y=%2720%27 width=%2724%27 height=%2724%27 rx=%277%27 fill=%27%23176557%27/%3E%3C/svg%3E">
   <script src="assets/icons.js" defer></script>
   <script src="components/app-tile.js" defer></script>
   <script src="components/context-menu.js" defer></script>
   <script src="components/logs-panel.js" defer></script>
   <script src="components/terminal-panel.js" defer></script>
   <script src="components/palette.js" defer></script>
+  <script src="components/callout.js" defer></script>
+  <script src="components/activity.js" defer></script>
+  <script src="components/failures.js" defer></script>
   <script src="app.js" defer></script>
   <script src="flows.js" defer></script>
 </head>
@@ -19,21 +23,24 @@
   <div class="prototype-bar"><strong>M1 · 交互原型</strong><span>示例数据 · 不操作真实进程</span></div>
   <div class="window">
     <header class="topbar">
-      <button class="brand" data-action="home" aria-label="AppHost 首页" data-tip="AppHost"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span class="brand-name">AppHost</span><i id="connection-dot" class="link-dot" aria-hidden="true"></i></button>
+      <button class="brand" data-action="home" aria-label="AppHost 首页" data-tip="AppHost"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 64 64"><rect x="8" y="8" width="48" height="48" rx="15" fill="none" stroke="currentColor" stroke-width="5" pathLength="100" stroke-dasharray="9 18 73 0"/><circle id="connection-dot" class="link-dot" cx="51.6" cy="12.4" r="4.5"/><rect x="20" y="20" width="24" height="24" rx="7" fill="currentColor" stroke="none"/></svg></span><span class="brand-name">AppHost</span></button>
       <label class="search-wrap"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14Zm5-2 5 5"/></svg><input id="search" type="search" aria-label="搜索应用" placeholder="搜索"><kbd>⌘K</kbd></label>
       <div id="bar-status" class="bar-status" role="toolbar" aria-label="按状态突出显示"></div>
+      <div id="activity" class="activity" role="group" aria-label="活动"></div>
       <button id="stop-all" class="stop-all" data-action="stop-all" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h10v10H7V7Z"/></svg><span>全部停止</span></button>
       <div class="bar-actions">
         <button class="icon-btn" data-action="add-menu" aria-label="添加应用或新建分组" data-tip="添加应用 · 新建分组"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
         <button class="icon-btn" data-action="manage" aria-label="管理" data-tip="管理"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3v7m0 4v7m6-18v3m0 4v11m6-18v11m0 4v3M3 10h6v4H3v-4Zm6-4h6v4H9V6Zm6 8h6v4h-6v-4"/></svg></button>
       </div>
     </header>
-    <div id="connection-banner"></div>
-    <main id="main"></main>
+    <div class="workspace">
+      <main id="main"></main>
+      <!-- Non-modal: the canvas stays usable while details are open. -->
+      <dialog id="detail" class="drawer" aria-labelledby="detail-title"></dialog>
+    </div>
   </div>
-  <details class="demo-controls"><summary>演示场景</summary><div class="demo-actions"><button data-action="reset">默认面板</button><button data-action="empty">首次使用</button><button data-action="free-port">解除示例端口占用</button><button data-action="reload-blip">模拟热重载</button><button data-action="service-fail">模拟服务故障</button><button data-action="disconnect">后台断开 / 重连</button></div></details>
-  <dialog id="detail" class="drawer" aria-labelledby="detail-title"></dialog>
+  <details class="demo-controls"><summary>演示场景</summary><div class="demo-actions"><button data-action="reset">默认面板</button><button data-action="empty">首次使用</button><button data-action="free-port">解除示例端口占用</button><button data-action="reload-blip">模拟热重载</button><button data-action="service-fail">模拟服务故障</button><button data-action="disconnect">后台断开 / 重连</button><button data-action="orphan-demo">模拟遗留进程</button></div><p class="demo-guide">失败场景（启动对应应用即可看到）：Whisper Studio 缺少依赖 · 家庭账本 Node 版本不符（在设置里采集 PATH 后恢复）· Focus Timer 脚本不存在 · Atlas Control 就绪超时 · Paper Reader（feat / ocr）启动后退出 · Blog Draft 与运行中的 Notes 端口冲突 · LLM Playground 启动较慢。同一原因再次失败时，提示会升级。</p></details>
   <dialog id="modal" class="modal" aria-labelledby="modal-title"></dialog>
-  <div id="toast" role="status" aria-live="polite"></div>
+  <div id="announce" class="sr-only" role="status" aria-live="polite"></div>
 </body>
 </html>

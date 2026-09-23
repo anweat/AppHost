@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>AppHost 图标方案</title>
+<link rel="icon" href="mark.svg">
+<style>
+:root{--page:#eef1ef;--surface:#fff;--ink:#172d2b;--muted:#60716d;--line:#dce3df;--accent:#176557;--plate-a:#23806d;--plate-b:#114a3f;
+  font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;color:var(--ink);background:var(--page);color-scheme:light}
+@media (prefers-color-scheme:dark){:root{--page:#0e1413;--surface:#161d1c;--ink:#e2ebe7;--muted:#8fa09a;--line:#2b3633;--accent:#52b79b;color-scheme:dark}}
+*{box-sizing:border-box}body{margin:0;padding:40px 16px 64px}
+main{max-width:1080px;margin:0 auto}
+h1{font-size:26px;letter-spacing:-.5px;margin:0}h2{font-size:17px;margin:0}
+.lede{color:var(--muted);margin:6px 0 32px;max-width:640px}
+.option{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:24px;margin-bottom:20px;display:grid;grid-template-columns:260px minmax(0,1fr);gap:28px}
+.option[data-pick]{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+.tag{display:inline-block;font-size:11px;font-weight:650;letter-spacing:.5px;color:var(--accent);margin-left:8px;vertical-align:2px}
+.why{color:var(--muted);font-size:13px;margin-top:8px}
+.why b{color:var(--ink);font-weight:600}
+.row{display:flex;align-items:end;gap:22px;flex-wrap:wrap}
+.cell{display:grid;justify-items:center;gap:6px;font-size:11px;color:var(--muted)}
+.mark{color:var(--accent);display:block}
+.app{width:112px;height:112px}
+.tray{display:flex;gap:10px;align-items:center;padding:0 12px;height:40px;border-radius:10px;border:1px solid var(--line)}
+.tray.light{background:#f6f7f6;color:#172d2b}.tray.dark{background:#1b1f1e;color:#e6ece9}
+.tray span{font-size:15px;font-weight:650;letter-spacing:-.3px}
+.chips{display:flex;gap:10px}
+@media(max-width:760px){.option{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<main>
+  <h1>AppHost 图标方案</h1>
+  <p class="lede">原来的四宫格标志和 Windows 徽标很像，这里给出三个原创方向，每个方向都演示了小尺寸标志、桌面应用图标，以及顶栏里的实际效果。<b>已选定 A</b>：它直接复用磁贴上的状态环语言；B、C 保留作为记录。源文件为 mark.svg 与 app-icon.svg。</p>
+
+  <template id="mark-a"><svg viewBox="0 0 64 64" fill="currentColor" aria-hidden="true"><rect x="8" y="8" width="48" height="48" rx="15" fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round" pathLength="100" stroke-dasharray="9 18 73 0"/><circle cx="51.6" cy="12.4" r="4.5"/><rect x="20" y="20" width="24" height="24" rx="7"/></svg></template>
+  <template id="mark-b"><svg viewBox="0 0 64 64" fill="currentColor" aria-hidden="true"><rect x="8" y="8" width="16" height="48" rx="5"/><rect x="40" y="8" width="16" height="48" rx="5"/><rect x="27" y="27" width="10" height="10" rx="3"/></svg></template>
+  <template id="mark-c"><svg viewBox="0 0 64 64" fill="currentColor" aria-hidden="true"><path d="M23 8h18a15 15 0 0 1 15 15v18a15 15 0 0 1-15 15H23A15 15 0 0 1 8 41V23A15 15 0 0 1 23 8Z" fill="none" stroke="currentColor" stroke-width="5"/><rect x="18" y="30" width="16" height="16" rx="5"/><circle cx="43" cy="21" r="5"/></svg></template>
+
+  <section class="option" data-pick data-mark="a">
+    <div><h2>A · 状态环<span class="tag">已选定</span></h2>
+      <p class="why">应用底板外面套一圈状态环，缺口处的圆点表示“活着”。<b>和界面同一套语言</b>：磁贴启动时的扫动环、多服务的分段环，都是这个形状的动态版本。</p>
+      <p class="why">16px 下仍然能看清缺口和圆点；单色即可成立，不依赖渐变。环上的缺口是和 Instagram 类图标拉开距离的关键，定稿前建议再做一次相似商标检索。</p></div>
+    <div class="preview"></div>
+  </section>
+  <section class="option" data-mark="b">
+    <div><h2>B · 磁贴 H</h2>
+      <p class="why">两块竖磁贴加一块小方块，拼成 Host 的 H，直接呼应磁贴面板。</p>
+      <p class="why">缺点：H 形标志很常见，辨识度一般；和“运行状态”没有联系。</p></div>
+    <div class="preview"></div>
+  </section>
+  <section class="option" data-mark="c">
+    <div><h2>C · 宿主窗口</h2>
+      <p class="why">一个窗口框里放着一个应用块，右上角的圆点表示在运行。字面意思最直接。</p>
+      <p class="why">缺点：小尺寸下内部元素挤在一起，容易糊成一团；“圆角框 + 内部图形 + 右上角圆点”的构图和 Instagram 图标很接近。</p></div>
+    <div class="preview"></div>
+  </section>
+</main>
+<script>
+// Each option renders the same set of sizes and contexts from one template.
+for (const option of document.querySelectorAll('.option')) {
+  const mark = document.querySelector(`#mark-${option.dataset.mark}`).innerHTML;
+  // Nested inside the 1024 icon grid, the mark needs an explicit 64-unit box.
+  const inner = mark.replace('<svg ', '<svg width="64" height="64" ');
+  const dot = option.dataset.mark === 'a' ? inner.replace('<circle', '<circle style="fill:#7ee0b8"') : inner;
+  option.querySelector('.preview').innerHTML = `
+    <div class="row">
+      ${[16, 24, 32, 48].map(size => `<div class="cell"><span class="mark" style="width:${size}px;height:${size}px">${mark}</span>${size}px</div>`).join('')}
+      <div class="cell"><svg class="app" viewBox="0 0 1024 1024"><defs><linearGradient id="g-${option.dataset.mark}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#23806d"/><stop offset="1" stop-color="#114a3f"/></linearGradient></defs><rect x="100" y="100" width="824" height="824" rx="185" fill="url(#g-${option.dataset.mark})"/><g transform="translate(224 224) scale(9)" style="color:#fff">${dot}</g></svg>macOS</div>
+      <div class="cell"><svg class="app" viewBox="0 0 1024 1024" style="width:88px;height:88px"><rect x="64" y="64" width="896" height="896" rx="120" fill="#176557"/><g transform="translate(224 224) scale(9)" style="color:#fff">${inner}</g></svg>Windows</div>
+    </div>
+    <div class="row" style="margin-top:22px">
+      <div class="chips">
+        <div class="tray light"><span class="mark" style="width:22px;height:22px;color:#176557">${mark}</span><span>AppHost</span></div>
+        <div class="tray dark"><span class="mark" style="width:22px;height:22px;color:#52b79b">${mark}</span><span>AppHost</span></div>
+      </div>
+    </div>`;
+}
+</script>
+</body>
+</html>

@@ -40,7 +40,7 @@ const palette=(()=>{
   input.addEventListener('input',()=>{active=0;if(document.activeElement===input)show();});
   input.addEventListener('keydown',e=>{
     if(e.key==='ArrowDown'||e.key==='ArrowUp'){e.preventDefault();if(panel.hidden)show();if(items.length)select((active+(e.key==='ArrowDown'?1:-1)+items.length)%items.length);}
-    else if(e.key==='Enter'){e.preventDefault();run(active,e.shiftKey);}
+    else if(e.key==='Enter'&&!e.isComposing&&e.keyCode!==229){e.preventDefault();run(active,e.shiftKey);}
     else if(e.key==='Escape'){
       e.preventDefault();e.stopPropagation();
       if(input.value){input.value='';input.dispatchEvent(new Event('input'));}else{hide();input.blur();}
