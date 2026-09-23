@@ -318,10 +318,29 @@ fn handle(
     data_dir: &Path,
     hello: &Value,
     manager: &Arc<crate::runtime::lifecycle::Manager>,
+    subscriptions: &Arc<AtomicUsize>,
 ) -> Result<()> {
     verify_peer(&stream)?;
     let request =
         read_frame(&mut stream, protocol::MAX_REQUEST).and_then(|bytes| protocol::decode(&bytes));
+    if let Ok(request) = &request
+        && request.version == protocol::VERSION
+        && matches!(request.method.as_str(), "subscribe" | "logs-follow")
+    {
+        let result = if request.method == "logs-follow" {
+            follow_logs(&mut stream, manager, request, subscriptions)
+        } else {
+            subscribe(&mut stream, manager, request, subscriptions)
+        };
+        if let Err(error) = result {
+            let response = protocol::response(Some(&request.request_id), Err(error));
+            return write_frame(
+                &mut stream,
+                &protocol::encode(&response, protocol::MAX_RESPONSE)?,
+            );
+        }
+        return Ok(());
+    }
     let (id, result) = match &request {
         Ok(request) => (
             Some(request.request_id.as_str()),
@@ -342,6 +361,134 @@ fn handle(
     write_frame(&mut stream, &bytes)
 }
 
+fn follow_logs(
+    stream: &mut UnixStream,
+    manager: &Arc<crate::runtime::lifecycle::Manager>,
+    request: &protocol::Request,
+    slots: &Arc<AtomicUsize>,
+) -> Result<()> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Params {
+        installation_id: Uuid,
+        instance_id: Uuid,
+        after: Option<u64>,
+        limit: Option<usize>,
+    }
+    let params: Params = serde_json::from_value(request.params.clone())
+        .map_err(|_| Error::new("INVALID_PARAMS", "Invalid log subscription parameters"))?;
+    slots
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            (n < 8).then_some(n + 1)
+        })
+        .map_err(|_| {
+            Error::new(
+                "SUBSCRIPTION_LIMIT",
+                "At most eight observation subscriptions",
+            )
+        })?;
+    let _slot = Slot(slots.clone());
+    let mut after = params.after;
+    loop {
+        let value = manager.logs_after(
+            params.installation_id,
+            params.instance_id,
+            after,
+            params.limit.unwrap_or(65536),
+        )?;
+        after = value["next_cursor"].as_u64();
+        let complete = value["complete"] == true;
+        let result = json!({"kind":"logs","data":value});
+        write_frame(
+            stream,
+            &protocol::encode(
+                &protocol::response(Some(&request.request_id), Ok(result)),
+                protocol::MAX_RESPONSE,
+            )?,
+        )?;
+        if complete {
+            return Ok(());
+        }
+        // Only explicit log readers pay this scan cost; no permanent watcher.
+        thread::sleep(Duration::from_millis(500));
+    }
+}
+
+fn subscribe(
+    stream: &mut UnixStream,
+    manager: &Arc<crate::runtime::lifecycle::Manager>,
+    request: &protocol::Request,
+    slots: &Arc<AtomicUsize>,
+) -> Result<()> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Params {
+        cursor: Option<crate::events::Cursor>,
+        installation_id: Option<Uuid>,
+    }
+    let params: Params = serde_json::from_value(request.params.clone())
+        .map_err(|_| Error::new("INVALID_PARAMS", "Invalid subscription parameters"))?;
+    slots
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            (n < 8).then_some(n + 1)
+        })
+        .map_err(|_| {
+            Error::new(
+                "SUBSCRIPTION_LIMIT",
+                "At most eight observation subscriptions",
+            )
+        })?;
+    let _slot = Slot(slots.clone());
+    let send = |stream: &mut UnixStream, value| {
+        write_frame(
+            stream,
+            &protocol::encode(
+                &protocol::response(Some(&request.request_id), Ok(value)),
+                protocol::MAX_RESPONSE,
+            )?,
+        )
+    };
+    let mut cursor = match params.cursor {
+        Some(cursor) => {
+            manager.events.after(&cursor, Duration::ZERO)?;
+            send(stream, json!({"kind":"subscribed","cursor":cursor}))?;
+            cursor
+        }
+        None => {
+            let snapshot = manager.status(params.installation_id)?;
+            let cursor = serde_json::from_value(snapshot["cursor"].clone())
+                .map_err(|_| Error::new("PROTOCOL_ERROR", "Missing snapshot cursor"))?;
+            send(
+                stream,
+                json!({"kind":"snapshot","snapshot":snapshot,"cursor":cursor}),
+            )?;
+            cursor
+        }
+    };
+    loop {
+        let events = manager.events.after(&cursor, Duration::from_secs(30))?;
+        if events.is_empty() {
+            send(stream, json!({"kind":"heartbeat","cursor":cursor}))?;
+        }
+        let had_events = !events.is_empty();
+        let mut sent = false;
+        for event in events {
+            cursor = serde_json::from_value(event["cursor"].clone())
+                .map_err(|_| Error::new("PROTOCOL_ERROR", "Invalid event cursor"))?;
+            if params.installation_id.is_none()
+                || event["installation_id"].is_null()
+                || event["installation_id"] == json!(params.installation_id)
+            {
+                send(stream, event)?;
+                sent = true;
+            }
+        }
+        if had_events && !sent {
+            send(stream, json!({"kind":"heartbeat","cursor":cursor}))?;
+        }
+    }
+}
+
 struct Slot(Arc<AtomicUsize>);
 impl Drop for Slot {
     fn drop(&mut self) {
@@ -355,10 +502,11 @@ pub(super) fn serve(data_dir: &Path) -> Result<()> {
     let endpoint = bind(&data_dir)?;
     let manager = crate::runtime::lifecycle::Manager::open(&data_dir)?;
     let hello = Arc::new(
-        json!({"protocol_version":protocol::VERSION,"daemon_id":Uuid::new_v4(),
-        "pid":std::process::id(),"data_dir":*data_dir,"capabilities":["hello","check-launch","start","stop","restart","status","stop-all","logs","detach","relink","failure","journal","resume-wake","history"]}),
+        json!({"protocol_version":protocol::VERSION,"daemon_id":manager.events.cursor().daemon_id,
+        "pid":std::process::id(),"data_dir":*data_dir,"capabilities":["hello","check-launch","start","stop","restart","status","stop-all","logs","detach","relink","failure","journal","resume-wake","history","subscribe","logs-follow"]}),
     );
     let clients = Arc::new(AtomicUsize::new(0));
+    let subscriptions = Arc::new(AtomicUsize::new(0));
     for stream in endpoint.listener.incoming() {
         let stream = match stream {
             Ok(stream) => stream,
@@ -373,13 +521,14 @@ pub(super) fn serve(data_dir: &Path) -> Result<()> {
         let data_dir = Arc::clone(&data_dir);
         let hello = Arc::clone(&hello);
         let manager = Arc::clone(&manager);
+        let subscriptions = subscriptions.clone();
         // Failed worker creation drops both stream and slot. No unbounded queue,
         // persistent idle worker pool, or client-owned cancellation state.
         let _ = thread::Builder::new()
             .name("apphost-rpc".into())
             .spawn(move || {
                 let _slot = slot;
-                let _ = handle(stream, &data_dir, &hello, &manager);
+                let _ = handle(stream, &data_dir, &hello, &manager, &subscriptions);
             });
     }
     Ok(())
@@ -451,6 +600,97 @@ fn handshake(data_dir: &Path) -> Result<Value> {
 
 pub(super) fn ping(data_dir: &Path) -> Result<Value> {
     handshake(&client_root(data_dir)?)
+}
+
+pub(super) fn watch(
+    data: &Path,
+    params: Value,
+    receive: impl FnMut(Value) -> Result<bool>,
+) -> Result<()> {
+    stream_events(data, "subscribe", params, receive)
+}
+
+pub(super) fn stream_events(
+    data: &Path,
+    method: &str,
+    params: Value,
+    mut receive: impl FnMut(Value) -> Result<bool>,
+) -> Result<()> {
+    let data = client_root(data)?;
+    let hello = handshake(&data)?;
+    if !hello["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m == method)
+    {
+        return Err(Error::new(
+            "METHOD_NOT_FOUND",
+            "Daemon does not advertise this stream",
+        ));
+    }
+    let mut stream = connect(&endpoint(&data)?)?;
+    let id = Uuid::new_v4().to_string();
+    let request =
+        json!({"version":protocol::VERSION,"request_id":id,"method":method,"params":params});
+    write_frame(
+        &mut stream,
+        &protocol::encode(&request, protocol::MAX_REQUEST)?,
+    )?;
+    let mut pending = Vec::new();
+    loop {
+        let bytes = read_stream_frame(&mut stream, &mut pending)?;
+        let event = protocol::result(&bytes, &id)?;
+        let complete = event["kind"] == "logs" && event["data"]["complete"] == true;
+        if !receive(event)? || complete {
+            return Ok(());
+        }
+    }
+}
+
+// Unlike a one-response RPC, a stream must retain bytes after the first newline.
+fn read_stream_frame(stream: &mut UnixStream, pending: &mut Vec<u8>) -> Result<Vec<u8>> {
+    let mut deadline = Instant::now()
+        + if pending.is_empty() {
+            Duration::from_secs(35)
+        } else {
+            DEADLINE
+        };
+    let mut buffer = [0; 4096];
+    loop {
+        if let Some(end) = pending.iter().position(|b| *b == b'\n') {
+            if end > protocol::MAX_RESPONSE {
+                return Err(Error::new(
+                    "MESSAGE_TOO_LARGE",
+                    "Event frame exceeds byte limit",
+                ));
+            }
+            let rest = pending.split_off(end + 1);
+            pending.pop();
+            return Ok(std::mem::replace(pending, rest));
+        }
+        if pending.len() > protocol::MAX_RESPONSE {
+            return Err(Error::new(
+                "MESSAGE_TOO_LARGE",
+                "Event frame exceeds byte limit",
+            ));
+        }
+        remaining(deadline)?;
+        match stream.read(&mut buffer) {
+            Ok(0) => return Err(unavailable()),
+            Ok(n) => {
+                if pending.is_empty() {
+                    deadline = Instant::now() + DEADLINE;
+                }
+                pending.extend_from_slice(&buffer[..n]);
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                wait_io(stream, libc::POLLIN, deadline)?
+            }
+            Err(e) => return Err(rpc_error(e)),
+        }
+    }
 }
 
 pub(super) fn check_launch(data_dir: &Path, installation_id: Uuid) -> Result<Value> {

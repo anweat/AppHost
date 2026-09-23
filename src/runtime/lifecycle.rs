@@ -132,7 +132,7 @@ fn log_path(data: &Path, r: &Record) -> PathBuf {
         .join(r.instance_id.to_string())
         .join("logs")
 }
-fn save_record(data: &Path, r: &mut Record) -> Result<()> {
+fn save_record(data: &Path, r: &mut Record, events: &crate::events::Hub) -> Result<()> {
     if r.finished_at_ms.is_none()
         && r.operation_done
         && !r.collector_alive
@@ -175,6 +175,7 @@ fn save_record(data: &Path, r: &mut Record) -> Result<()> {
     } else {
         r.warnings.retain(|w| w["code"] != "HISTORY_WRITE_FAILED");
     }
+    events.publish("instance", Some(r.installation_id), json!(r));
     Ok(())
 }
 fn new_record(id: Uuid, op: Uuid, plan: &LaunchPlan, epoch: u64) -> Record {
@@ -335,6 +336,7 @@ pub(crate) struct Manager {
     paused: AtomicBool,
     stop_epoch: AtomicU64,
     failures: crate::failure::capture::Recorder,
+    pub(crate) events: Arc<crate::events::Hub>,
 }
 impl Manager {
     fn capture_failure(&self, h: &Handle, recovered: bool) {
@@ -389,13 +391,14 @@ impl Manager {
             log_incomplete: r.status.log_incomplete,
             recovered,
         };
-        if let Err(e) = save_record(&self.data, &mut r) {
+        if let Err(e) = save_record(&self.data, &mut r, &self.events) {
             r.warnings.push(json!({"code":"FAILURE_CAPTURE_INCOMPLETE","level":"warning","title":"Failure reference was not saved","evidence":{"error_code":e.code}}));
         }
         drop(r);
         self.failures.incident(job);
     }
     pub fn open(data: &Path) -> Result<Arc<Self>> {
+        let events = Arc::new(crate::events::Hub::new());
         storage::private_directory(&data.join("runtime"))?;
         // The daemon singleton lock excludes any other runtime publisher.
         // Remove only our identifiable, unpublished regular temporary files.
@@ -455,7 +458,7 @@ impl Manager {
                         r.operation_done = true;
                     }
                 }
-                save_record(data, r)?;
+                save_record(data, r, &events)?;
             }
             storage::publish(&data.join("wake.json"), &encode(&wake)?, true)?;
         }
@@ -466,7 +469,8 @@ impl Manager {
             startup_warnings,
             paused: AtomicBool::new(wake.paused),
             stop_epoch: AtomicU64::new(wake.stop_epoch),
-            failures: crate::failure::capture::Recorder::open(data.to_owned())?,
+            failures: crate::failure::capture::Recorder::open(data.to_owned(), events.clone())?,
+            events: events.clone(),
         });
         let mut recovered = Vec::new();
         for mut r in records {
@@ -506,7 +510,7 @@ impl Manager {
                 }
                 r.operation_done = true;
             }
-            save_record(data, &mut r)?;
+            save_record(data, &mut r, &events)?;
             let id = r.installation_id;
             let stopping = r.status.state() == State::Stopping
                 || (!r.operation_done && (r.pending_mutation.is_some() || r.restart_after_stop));
@@ -563,7 +567,7 @@ impl Manager {
                         if matches!(error.code.as_str(), "IO_ERROR" | "MANAGEMENT_UNCERTAIN") {
                             r.management_uncertain = true;
                         }
-                        let _ = save_record(&manager.data, &mut r);
+                        let _ = save_record(&manager.data, &mut r, &manager.events);
                     }
                     manager.capture_failure(&h, false);
                     let r = h.record.lock().unwrap();
@@ -585,15 +589,19 @@ impl Manager {
     }
     pub fn status(&self, id: Option<Uuid>) -> Result<Value> {
         let handles = self.handles.lock().unwrap();
-        let records: Vec<_> = handles
+        // Hold records in installation order, then take the event cursor. Writers
+        // publish under the same record lock, so a snapshot cannot skip an update.
+        let guards: Vec<_> = handles
             .iter()
             .filter(|(key, _)| id.is_none_or(|id| id == **key))
-            .map(|(_, h)| h.record.lock().unwrap().clone())
+            .map(|(_, h)| h.record.lock().unwrap())
             .collect();
+        let records: Vec<_> = guards.iter().map(|r| (**r).clone()).collect();
+        let cursor = self.events.cursor();
         let mut warnings = self.startup_warnings.clone();
         warnings.extend(self.failures.warnings());
         Ok(
-            json!({"live":true,"automatic_wake_paused":self.paused.load(Ordering::Acquire),"instances":records,"warnings":warnings}),
+            json!({"live":true,"cursor":cursor,"automatic_wake_paused":self.paused.load(Ordering::Acquire),"instances":records,"warnings":warnings}),
         )
     }
     pub fn start(self: &Arc<Self>, id: Uuid, actor: Actor) -> Result<Value> {
@@ -711,7 +719,7 @@ impl Manager {
             record.journal_pending = old.record.lock().unwrap().journal_pending.clone();
         }
         audit::begin(&mut record, action, actor);
-        save_record(&self.data, &mut record)?;
+        save_record(&self.data, &mut record, &self.events)?;
         let result = receipt(&record);
         let h = Arc::new(Handle {
             record: Mutex::new(record),
@@ -786,7 +794,7 @@ impl Manager {
             None => "stop",
         };
         audit::begin(&mut r, action, actor);
-        save_record(&self.data, &mut r)?;
+        save_record(&self.data, &mut r, &self.events)?;
         h.control
             .store(if restart { 2 } else { 1 }, Ordering::Release);
         let result = receipt(&r);
@@ -823,13 +831,15 @@ impl Manager {
                 true,
             )?;
             self.paused.store(true, Ordering::Release);
+            self.events
+                .publish("wake", None, json!({"automatic_wake_paused":true}));
             self.stop_epoch.store(epoch, Ordering::Release);
             for h in handles.values() {
                 let mut r = h.record.lock().unwrap();
                 // StopAll cancels the launch half of an accepted Restart.
                 if h.control.load(Ordering::Acquire) == 2 {
                     r.restart_after_stop = false;
-                    save_record(&self.data, &mut r)?;
+                    save_record(&self.data, &mut r, &self.events)?;
                     h.control.store(1, Ordering::Release);
                 }
             }
@@ -858,6 +868,8 @@ impl Manager {
             true,
         )?;
         self.paused.store(false, Ordering::Release);
+        self.events
+            .publish("wake", None, json!({"automatic_wake_paused":false}));
         Ok(json!({"automatic_wake_paused":false}))
     }
     pub fn logs(
@@ -868,18 +880,7 @@ impl Manager {
         to: u128,
         limit: usize,
     ) -> Result<Value> {
-        let r = self
-            .handles
-            .lock()
-            .unwrap()
-            .get(&id)
-            .map(|h| h.record.lock().unwrap().clone())
-            .ok_or_else(|| Error::new("NOT_FOUND", "No runtime instance"))?;
-        let r = if r.instance_id == instance {
-            r
-        } else {
-            retention::read(&self.data, id, instance)?
-        };
+        let r = self.log_record(id, instance)?;
         // JSON byte arrays can expand sixfold. Keep the wire response under 1 MiB.
         if !(1..=128 * 1024).contains(&limit) {
             return Err(Error::new(
@@ -891,6 +892,46 @@ impl Manager {
             .map_err(|e| storage::io_error(&log_path(&self.data, &r), e))?;
         Ok(
             json!({"instance_id":instance,"log_incomplete":r.status.log_incomplete,"services":r.services.iter().map(|s|json!({"name":s.name,"key":s.key})).collect::<Vec<_>>(),"window":window}),
+        )
+    }
+    fn log_record(&self, id: Uuid, instance: Uuid) -> Result<Record> {
+        let r = self
+            .handles
+            .lock()
+            .unwrap()
+            .get(&id)
+            .map(|h| h.record.lock().unwrap().clone())
+            .ok_or_else(|| Error::new("NOT_FOUND", "No runtime instance"))?;
+        if r.instance_id == instance {
+            Ok(r)
+        } else {
+            retention::read(&self.data, id, instance)
+        }
+    }
+    pub fn logs_after(
+        &self,
+        id: Uuid,
+        instance: Uuid,
+        after: Option<u64>,
+        limit: usize,
+    ) -> Result<Value> {
+        if !(crate::logs::READ_CHUNK..=128 * 1024).contains(&limit) {
+            return Err(Error::new(
+                "INVALID_PARAMS",
+                "Follow byte limit must be 4096..131072",
+            ));
+        }
+        let r = self.log_record(id, instance)?;
+        let root = log_path(&self.data, &r);
+        let window = crate::logs::read_after(&root, after, limit)
+            .map_err(|e| storage::io_error(&root, e))?;
+        let next = window.chunks.last().map(|c| c.sequence).or(after);
+        let complete = !window.truncated
+            && (root.with_extension("complete").is_file()
+                || (!r.collector_alive
+                    && matches!(r.status.state(), State::Stopped | State::Failed)));
+        Ok(
+            json!({"instance_id":instance,"next_cursor":next,"complete":complete,"log_incomplete":r.status.log_incomplete,"services":r.services.iter().map(|s|json!({"name":s.name,"key":s.key})).collect::<Vec<_>>(),"window":window}),
         )
     }
 }

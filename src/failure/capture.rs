@@ -35,7 +35,7 @@ fn warn(warnings: &Mutex<Vec<Value>>, id: Uuid, error: &Error) {
         "evidence":{"installation_id":id,"error_code":error.code},"actions":[],"clears_when":"next daemon session"}));
 }
 impl Recorder {
-    pub fn open(data: PathBuf) -> Result<Self> {
+    pub fn open(data: PathBuf, events: Arc<crate::events::Hub>) -> Result<Self> {
         let (sender, receiver) = mpsc::sync_channel(64);
         let warnings = Arc::new(Mutex::new(vec![]));
         let errors = warnings.clone();
@@ -82,6 +82,7 @@ impl Recorder {
                             if let Err(e) = store::save(&data, &job.failure, now()) {
                                 warn(&errors, id, &e);
                             }
+                            events.publish("failure", Some(id), json!({"failure_id":job.failure.failure_id,"collecting":job.failure.collecting}));
                             if job.failure.collecting {
                                 pending.push((
                                     Instant::now()
@@ -107,6 +108,7 @@ impl Recorder {
                         if let Err(e) = store::save(&data, &job.failure, now()) {
                             warn(&errors, job.failure.installation_id, &e);
                         }
+                        events.publish("failure", Some(job.failure.installation_id), json!({"failure_id":job.failure.failure_id,"collecting":false}));
                     }
                 }
             })
@@ -342,7 +344,7 @@ mod tests {
                 .unwrap();
         }
         drop(writer);
-        let recorder = Recorder::open(data.clone()).unwrap();
+        let recorder = Recorder::open(data.clone(), Arc::new(crate::events::Hub::new())).unwrap();
         let mut failure = Failure::new(id, "SERVICE_EXITED", at);
         failure.instance_id = Some(instance);
         failure.service = Some("web".into());

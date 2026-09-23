@@ -194,6 +194,136 @@ fn free_port() -> u16 {
 }
 
 #[test]
+fn subscription_snapshot_replay_and_restart_cursor_are_consistent() {
+    let mut f = Fixture::new();
+    let id = f.register(json!({}), None, false);
+    f.boot();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let data = f.data.clone();
+    let reader = thread::spawn(move || {
+        daemon::watch(&data, json!({"installation_id":id}), |v| {
+            let done = v["kind"] == "instance" && v["data"]["status"]["state"] == "RUNNING";
+            tx.send(v).unwrap();
+            Ok(!done)
+        })
+    });
+    let snapshot = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert_eq!(snapshot["kind"], "snapshot");
+    let cursor = snapshot["cursor"].clone();
+    f.rpc("start", json!({"installation_id":id}));
+    let mut previous = cursor["sequence"].as_u64().unwrap();
+    loop {
+        let event = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let sequence = event["cursor"]["sequence"].as_u64().unwrap();
+        assert!(sequence > previous);
+        previous = sequence;
+        if event["data"]["status"]["state"] == "RUNNING" {
+            break;
+        }
+    }
+    reader.join().unwrap().unwrap();
+    let mut replay = Vec::new();
+    daemon::watch(&f.data, json!({"cursor":cursor}), |v| {
+        let done = v["kind"] == "instance";
+        replay.push(v);
+        Ok(!done)
+    })
+    .unwrap();
+    assert_eq!(replay[0]["kind"], "subscribed");
+    assert_eq!(
+        replay[1]["cursor"]["sequence"],
+        cursor["sequence"].as_u64().unwrap() + 1
+    );
+    f.crash();
+    f.boot();
+    let error = daemon::watch(&f.data, json!({"cursor":cursor}), |_| Ok(false)).unwrap_err();
+    assert_eq!(error.code, "EVENT_CURSOR_EXPIRED");
+}
+
+#[test]
+fn log_follow_preserves_sequences_and_finishes_after_explicit_stop() {
+    let mut f = Fixture::new();
+    let id = f.register(json!({}), None, false);
+    f.boot();
+    f.rpc("start", json!({"installation_id":id}));
+    let running = f.until(id, "RUNNING");
+    let data = f.data.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let thread = thread::spawn(move || {
+        daemon::follow_logs(
+            &data,
+            json!({"installation_id":id,"instance_id":running["instance_id"],"limit":4096}),
+            |event| {
+                tx.send(event).unwrap();
+                Ok(true)
+            },
+        )
+    });
+    let first = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert!(
+        !first["data"]["window"]["chunks"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    f.rpc("stop", json!({"installation_id":id}));
+    f.until(id, "STOPPED");
+    let mut last = first["data"]["next_cursor"].as_u64().unwrap();
+    loop {
+        let event = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        for chunk in event["data"]["window"]["chunks"].as_array().unwrap() {
+            let sequence = chunk["sequence"].as_u64().unwrap();
+            assert!(sequence > last);
+            last = sequence;
+        }
+        if event["data"]["complete"] == true {
+            break;
+        }
+    }
+    thread.join().unwrap().unwrap();
+}
+
+#[test]
+fn full_subscription_capacity_leaves_stop_rpc_available() {
+    use std::io::{BufRead, BufReader};
+    use std::os::unix::net::UnixStream;
+    let mut f = Fixture::new();
+    let id = f.register(json!({}), None, false);
+    f.boot();
+    f.rpc("start", json!({"installation_id":id}));
+    f.until(id, "RUNNING");
+    let mut held = Vec::new();
+    for index in 0..8 {
+        let mut socket = UnixStream::connect(f.data.join("daemon.sock")).unwrap();
+        writeln!(
+            socket,
+            "{}",
+            json!({"version":1,"request_id":format!("s{index}"),"method":"subscribe","params":{}})
+        )
+        .unwrap();
+        let mut reader = BufReader::new(socket);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&line).unwrap()["result"]["kind"],
+            "snapshot"
+        );
+        held.push(reader);
+    }
+    assert_eq!(
+        daemon::watch(&f.data, json!({}), |_| Ok(false))
+            .unwrap_err()
+            .code,
+        "SUBSCRIPTION_LIMIT"
+    );
+    let start = Instant::now();
+    f.rpc("stop", json!({"installation_id":id}));
+    f.until(id, "STOPPED");
+    assert!(start.elapsed() < Duration::from_secs(4));
+    drop(held);
+}
+
+#[test]
 fn success_baseline_and_finished_history_survive_restart_and_explain_changes() {
     let mut f = Fixture::new();
     let id = f.register(json!({}), None, false);

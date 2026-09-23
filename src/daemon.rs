@@ -85,6 +85,35 @@ pub fn status(data_dir: &Path, installation_id: Option<Uuid>) -> Result<Value> {
     }
 }
 
+/// Read-only streaming observations. Returning false closes this subscription.
+pub fn watch(data: &Path, params: Value, receive: impl FnMut(Value) -> Result<bool>) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::watch(data, params, receive)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (data, params, receive);
+        Err(unsupported())
+    }
+}
+
+pub fn follow_logs(
+    data: &Path,
+    params: Value,
+    receive: impl FnMut(Value) -> Result<bool>,
+) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::stream_events(data, "logs-follow", params, receive)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (data, params, receive);
+        Err(unsupported())
+    }
+}
+
 /// Registration writes need runtime coordination only when a daemon is live or
 /// a durable instance exists. M0-only offline work remains a short L0 operation.
 pub fn coordinate(data: &Path, id: Uuid, method: &str, params: Value) -> Result<Option<Value>> {

@@ -9,7 +9,7 @@ use std::{
     path::PathBuf,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
-pub use window::{LogChunk, LogWindow, read_stderr_tail, read_tail, read_window};
+pub use window::{LogChunk, LogWindow, read_after, read_stderr_tail, read_tail, read_window};
 
 pub const READ_CHUNK: usize = 4096;
 

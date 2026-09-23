@@ -31,6 +31,14 @@ enum Command {
     Status { installation_id: Option<Uuid> },
     /// Read retained run history without starting the daemon.
     History { installation_id: Uuid },
+    /// Stream bounded runtime observations; never starts a daemon.
+    Watch {
+        #[arg(long)]
+        installation_id: Option<Uuid>,
+        /// JSON cursor from a previous status snapshot or event.
+        #[arg(long)]
+        cursor: Option<String>,
+    },
     /// Read retained failure evidence without starting the daemon or an App.
     Failure {
         installation_id: Uuid,
@@ -56,6 +64,10 @@ enum Command {
     Logs {
         installation_id: Uuid,
         instance_id: Uuid,
+        #[arg(long)]
+        follow: bool,
+        #[arg(long, requires = "follow")]
+        after: Option<u64>,
         #[arg(long, default_value_t = 0)]
         from_ms: u128,
         #[arg(long,default_value_t=u64::MAX as u128)]
@@ -273,6 +285,32 @@ fn run(cli: Cli) -> Result<Option<Value>> {
 fn run_command(cli: Cli) -> Result<Option<Value>> {
     // Read-only project commands don't need an available home or writable registry.
     let result = match cli.command {
+        Command::Watch {
+            installation_id,
+            cursor,
+        } => {
+            use std::io::Write;
+            let cursor = cursor
+                .map(|c| {
+                    serde_json::from_str::<apphost::events::Cursor>(&c)
+                        .map_err(|_| Error::new("INVALID_PARAMS", "Invalid event cursor JSON"))
+                })
+                .transpose()?;
+            apphost::daemon::watch(
+                &data_dir(cli.data_dir)?,
+                json!({"installation_id":installation_id,"cursor":cursor}),
+                |event| {
+                    let mut out = std::io::stdout().lock();
+                    serde_json::to_writer(&mut out, &event)
+                        .map_err(|e| Error::new("IO_ERROR", e.to_string()))?;
+                    out.write_all(b"\n")
+                        .and_then(|_| out.flush())
+                        .map_err(|e| Error::new("IO_ERROR", e.to_string()))?;
+                    Ok(true)
+                },
+            )?;
+            return Ok(None);
+        }
         Command::History { installation_id } => {
             apphost::failure::read_history(&data_dir(cli.data_dir)?, installation_id)
                 .map(|h| json!(h))
@@ -332,15 +370,43 @@ fn run_command(cli: Cli) -> Result<Option<Value>> {
         Command::Logs {
             installation_id,
             instance_id,
+            follow,
+            after,
             from_ms,
             to_ms,
             limit,
-        } => apphost::daemon::call(
-            &data_dir(cli.data_dir)?,
-            "logs",
-            json!({"installation_id":installation_id,"instance_id":instance_id,"from_ms":from_ms,"to_ms":to_ms,"limit":limit}),
-            false,
-        ),
+        } => {
+            if follow {
+                if from_ms != 0 || to_ms != u64::MAX as u128 {
+                    return Err(Error::new(
+                        "INVALID_PARAMS",
+                        "Use --after rather than a time window with --follow",
+                    ));
+                }
+                apphost::daemon::follow_logs(
+                    &data_dir(cli.data_dir)?,
+                    json!({"installation_id":installation_id,"instance_id":instance_id,"after":after,"limit":limit}),
+                    |event| {
+                        use std::io::Write;
+                        let mut out = std::io::stdout().lock();
+                        serde_json::to_writer(&mut out, &event)
+                            .map_err(|e| Error::new("IO_ERROR", e.to_string()))?;
+                        out.write_all(b"\n")
+                            .and_then(|_| out.flush())
+                            .map_err(|e| Error::new("IO_ERROR", e.to_string()))?;
+                        Ok(true)
+                    },
+                )?;
+                return Ok(None);
+            } else {
+                apphost::daemon::call(
+                    &data_dir(cli.data_dir)?,
+                    "logs",
+                    json!({"installation_id":installation_id,"instance_id":instance_id,"from_ms":from_ms,"to_ms":to_ms,"limit":limit}),
+                    false,
+                )
+            }
+        }
         Command::Daemon { command } => {
             let directory = data_dir(cli.data_dir)?;
             match command {

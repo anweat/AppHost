@@ -141,6 +141,16 @@ data-dir 先规范化，复用私有目录规则。`daemon.lock` 使用独占 OS
 
 `hello` 参数为空对象，返回 protocol_version、daemon_id（每次进程启动重新生成）、pid、data_dir 和 capabilities。客户端先完成同版本握手再发送其他 RPC。`check-launch` 仅接受 installation_id，返回与 LaunchPlan::summary 相同的预检结果，不执行服务、不持有可供客户端复用的启动授权。只有 capabilities 声明的已实现方法可以调用；未知方法返回 METHOD_NOT_FOUND。运行操作、事件订阅和历史状态查询按下述契约接入，不能用空状态响应冒充已完成对账。
 
+### 有界事件与日志订阅
+
+`status` 在线快照附带 `{daemon_id, sequence}` 游标，实例写入在持有该实例锁时发布观察；生成快照按安装顺序锁定所选实例后取得游标，避免快照与订阅之间丢失更新。游标仅属于本次 daemon 会话，与操作日志和日志采集序号分别使用。
+
+`subscribe` 使用独立连接，参数为可选 cursor 和 installation_id。无游标时先返回 snapshot；有游标时先验证并返回 subscribed，随后回放严格递增的事件。事件种类包括 instance（运行观察）、wake（自动唤醒暂停）和 failure（现场已更新，携带 failure_id 供重新读取）。环形缓冲最多 256 条、4 MiB；单条超过 256 KiB 时发送 resync_required，要求重新获取快照。过期、跨会话或超前游标返回 EVENT_CURSOR_EXPIRED 并关闭连接，不能静默跳过。无事件时阻塞等待，每 30 秒一条 heartbeat；安装过滤仍推进全局游标。
+
+事件和日志订阅合计最多 8 个，仍受总连接数 16 的上限约束，为短 RPC 保留余量；每条写入期限 2 秒。生产者只发布有界内存观察，不等待客户端 IO。客户端断开仅关闭订阅，不取消运行操作。CLI `watch [--installation-id UUID] [--cursor JSON]` 输出 JSON Lines，不自动拉起 daemon。
+
+`logs --follow` 使用 logs-follow 流式方法，固定 installation_id 和 instance_id，以 after（最后消费的采集序号）续读，limit 为 4096–131072 字节，默认 65536；不与时间窗口混用。每帧返回 window、next_cursor、complete 和 log_incomplete，原始字节仍不改写。轮转淘汰游标前缀时通过 prefix_evicted 明示缺口，后续块不重复；读取到实例输出结束后发送 complete=true 并关闭。只在有订阅时每约 500 ms 有界读取，不增加常驻日志轮询线程，慢读不持有安装锁。
+
 ### 生命周期与持久化
 
 显式 `start / stop / restart / stop-all` 在 daemon 不在线时，可以用当前 AppHost 可执行文件拉起 `daemon serve`，在 5 秒内完成同版本握手；启动错误提示用前台 serve 查看原因，不另选 data-dir 或端点。`status` 不拉起 daemon：在线返回 `live: true`，离线只读取历史并明确返回 `live: false`。`logs` 只读且不拉起 daemon。运行方法必须出现在 hello.capabilities 中。

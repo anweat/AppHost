@@ -1,6 +1,7 @@
 pub mod daemon;
 pub mod discovery;
 pub mod environment;
+pub mod events;
 pub mod failure;
 mod git_metadata;
 pub mod journal;

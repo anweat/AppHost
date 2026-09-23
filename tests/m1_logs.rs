@@ -3,6 +3,25 @@ use std::fs;
 use tempfile::TempDir;
 
 #[test]
+fn sequence_follow_handles_pagination_and_rotated_prefix_without_duplicates() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("follow");
+    let mut writer = LogWriter::create(root.clone(), 8192, 2).unwrap();
+    for _ in 0..8 {
+        writer.append("web", Stream::Stdout, &[b'x'; 4096]).unwrap();
+    }
+    let first = apphost::logs::read_after(&root, None, 4096).unwrap();
+    assert!(first.prefix_evicted);
+    assert_eq!(first.chunks.len(), 1);
+    let sequence = first.chunks[0].sequence;
+    let next = apphost::logs::read_after(&root, Some(sequence), 4096).unwrap();
+    assert!(!next.prefix_evicted);
+    assert_eq!(next.chunks[0].sequence, sequence + 1);
+    let missed = apphost::logs::read_after(&root, Some(0), 4096).unwrap();
+    assert!(missed.prefix_evicted);
+}
+
+#[test]
 fn bounded_tail_preserves_the_final_error_after_a_stdout_flood() {
     let temp = TempDir::new().unwrap();
     let root = temp.path().join("tail");

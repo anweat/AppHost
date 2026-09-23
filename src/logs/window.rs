@@ -59,7 +59,7 @@ pub fn read_window(
     to_ms: u128,
     max_bytes: usize,
 ) -> io::Result<LogWindow> {
-    read_bounded(root, from_ms, to_ms, max_bytes, false, false, None)
+    read_bounded(root, from_ms, to_ms, max_bytes, false, Filter::default())
 }
 
 /// Keep the newest complete blocks for failure evidence under output floods.
@@ -69,7 +69,7 @@ pub fn read_tail(
     to_ms: u128,
     max_bytes: usize,
 ) -> io::Result<LogWindow> {
-    read_bounded(root, from_ms, to_ms, max_bytes, true, false, None)
+    read_bounded(root, from_ms, to_ms, max_bytes, true, Filter::default())
 }
 
 pub fn read_stderr_tail(
@@ -79,7 +79,38 @@ pub fn read_stderr_tail(
     max_bytes: usize,
     service_key: Option<&str>,
 ) -> io::Result<LogWindow> {
-    read_bounded(root, from_ms, to_ms, max_bytes, true, true, service_key)
+    read_bounded(
+        root,
+        from_ms,
+        to_ms,
+        max_bytes,
+        true,
+        Filter {
+            stderr_only: true,
+            service_key,
+            after: None,
+        },
+    )
+}
+
+pub fn read_after(root: &Path, after: Option<u64>, max_bytes: usize) -> io::Result<LogWindow> {
+    read_bounded(
+        root,
+        0,
+        u128::MAX,
+        max_bytes,
+        false,
+        Filter {
+            after,
+            ..Filter::default()
+        },
+    )
+}
+#[derive(Default)]
+struct Filter<'a> {
+    stderr_only: bool,
+    service_key: Option<&'a str>,
+    after: Option<u64>,
 }
 
 fn read_bounded(
@@ -88,8 +119,7 @@ fn read_bounded(
     to_ms: u128,
     max_bytes: usize,
     tail: bool,
-    stderr_only: bool,
-    service_key: Option<&str>,
+    filter: Filter<'_>,
 ) -> io::Result<LogWindow> {
     if from_ms > to_ms || !(1..=1024 * 1024).contains(&max_bytes) {
         return Err(io::Error::new(
@@ -172,17 +202,28 @@ fn read_bounded(
                 if chunk.observed_ms < timestamp {
                     window.clock_reversed = true;
                 }
-            } else if chunk.sequence > 0 && from_ms <= chunk.observed_ms {
+            } else if chunk.sequence > 0
+                && from_ms <= chunk.observed_ms
+                && filter
+                    .after
+                    .is_none_or(|after| chunk.sequence > after.saturating_add(1))
+            {
                 window.prefix_evicted = true;
             }
             previous = Some((chunk.sequence, chunk.observed_ms));
             if chunk.observed_ms < from_ms || chunk.observed_ms > to_ms {
                 continue;
             }
-            if stderr_only && chunk.stream != Stream::Stderr {
+            if filter.after.is_some_and(|after| chunk.sequence <= after) {
                 continue;
             }
-            if service_key.is_some_and(|key| key != chunk.service_key) {
+            if filter.stderr_only && chunk.stream != Stream::Stderr {
+                continue;
+            }
+            if filter
+                .service_key
+                .is_some_and(|key| key != chunk.service_key)
+            {
                 continue;
             }
             if read_bytes + chunk.length > max_bytes || window.chunks.len() >= 4096 {

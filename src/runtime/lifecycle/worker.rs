@@ -107,7 +107,7 @@ fn spawn(manager: &Manager, h: &Handle, plan: LaunchPlan, live: &mut Live) -> Re
         let mut r = h.record.lock().unwrap();
         r.collector_attempted = true;
         r.collector_alive = true;
-        save_record(data, &mut r)?;
+        save_record(data, &mut r, &manager.events)?;
     }
     let pipes = collector::spawn(&root, count);
     let mut pipes = match pipes {
@@ -126,7 +126,7 @@ fn spawn(manager: &Manager, h: &Handle, plan: LaunchPlan, live: &mut Live) -> Re
     {
         let mut r = h.record.lock().unwrap();
         r.collector = live.collector.clone();
-        save_record(data, &mut r)?;
+        save_record(data, &mut r, &manager.events)?;
     }
     collector::ready(live.collector_child.as_mut().unwrap())?;
     live.groups = (0..count).map(|_| None).collect();
@@ -145,7 +145,7 @@ fn spawn(manager: &Manager, h: &Handle, plan: LaunchPlan, live: &mut Live) -> Re
                 break;
             }
             r.services[i].spawn_attempted = true;
-            save_record(data, &mut r)?;
+            save_record(data, &mut r, &manager.events)?;
             let child = process::spawn_group(
                 service
                     .into_command()
@@ -167,12 +167,13 @@ fn spawn(manager: &Manager, h: &Handle, plan: LaunchPlan, live: &mut Live) -> Re
             live.groups[i] = Some(Group::capture_spawned(live.children[i].as_ref().unwrap())?);
             r.services[i].group = live.groups[i].clone();
             r.services[i].alive = true;
-            save_record(data, &mut r)?;
+            save_record(data, &mut r, &manager.events)?;
         }
         Ok(())
     })
 }
-fn stop_groups(data: &Path, h: &Handle, live: &mut Live) -> Result<bool> {
+fn stop_groups(manager: &Manager, h: &Handle, live: &mut Live) -> Result<bool> {
+    let data = &manager.data;
     let mut errors = Vec::new();
     for i in 0..live.groups.len() {
         if let Some(group) = &mut live.groups[i] {
@@ -235,7 +236,7 @@ fn stop_groups(data: &Path, h: &Handle, live: &mut Live) -> Result<bool> {
             json!({"code":"STOP_FAILED","groups":errors,"management_uncertain":r.management_uncertain}),
         );
     }
-    save_record(data, &mut r)?;
+    save_record(data, &mut r, &manager.events)?;
     Ok(r.status.state() == State::Stopped)
 }
 pub(super) fn run(
@@ -261,13 +262,13 @@ pub(super) fn run(
                 if error.code == "MANAGEMENT_UNCERTAIN" {
                     r.management_uncertain = true;
                 }
-                save_record(&manager.data, &mut r)?;
+                save_record(&manager.data, &mut r, &manager.events)?;
             }
         }
         let control = h.control.load(Ordering::Acquire);
         if control != 0 {
             let epoch = manager.stop_epoch.load(Ordering::Acquire);
-            let stopped = stop_groups(&manager.data, h, live)?;
+            let stopped = stop_groups(manager, h, live)?;
             let restart_still_requested = h.control.swap(0, Ordering::AcqRel) == 2;
             if stopped {
                 let mut r = h.record.lock().unwrap();
@@ -278,7 +279,7 @@ pub(super) fn run(
                     }
                 }
                 r.operation_done = !(control == 2 && restart_still_requested);
-                save_record(&manager.data, &mut r)?;
+                save_record(&manager.data, &mut r, &manager.events)?;
             } else {
                 let mut r = h.record.lock().unwrap();
                 r.pending_mutation = None;
@@ -336,7 +337,7 @@ pub(super) fn run(
                     *r = new_record(id, op, &prepared, epoch);
                     r.audit = operation;
                     r.journal_pending = pending;
-                    save_record(&manager.data, &mut r)?;
+                    save_record(&manager.data, &mut r, &manager.events)?;
                 }
                 drop(handles);
                 *live = Live::empty();
@@ -498,7 +499,7 @@ pub(super) fn run(
             }
             if encode(&*r)? != before {
                 r.updated_at_ms = now();
-                save_record(&manager.data, &mut r)?;
+                save_record(&manager.data, &mut r, &manager.events)?;
             }
         }
         manager.capture_failure(h, false);
@@ -560,7 +561,7 @@ mod tests {
             let result = spawn(&other, &h, plan, &mut live);
             sender.send(result.is_err()).unwrap();
             h.record.lock().unwrap().status.request_stop();
-            stop_groups(&other.data, &h, &mut live).unwrap();
+            stop_groups(&other, &h, &mut live).unwrap();
         });
         let prepared = receiver.recv_timeout(Duration::from_secs(3));
         drop(gate);
