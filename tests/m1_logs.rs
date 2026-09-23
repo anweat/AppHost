@@ -3,6 +3,29 @@ use std::fs;
 use tempfile::TempDir;
 
 #[test]
+fn bounded_tail_preserves_the_final_error_after_a_stdout_flood() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("tail");
+    let mut writer = LogWriter::create(root.clone(), 1024 * 1024, 2).unwrap();
+    for _ in 0..100 {
+        writer
+            .append("s0", Stream::Stdout, &vec![b'x'; 4096])
+            .unwrap();
+    }
+    writer
+        .append("s0", Stream::Stderr, b"ModuleNotFoundError: gradio")
+        .unwrap();
+    drop(writer);
+    let tail = apphost::logs::read_tail(&root, 0, u128::MAX, 8192).unwrap();
+    assert!(tail.truncated);
+    assert!(tail.chunks.iter().map(|c| c.bytes.len()).sum::<usize>() <= 8192);
+    assert_eq!(
+        tail.chunks.last().unwrap().bytes,
+        b"ModuleNotFoundError: gradio"
+    );
+}
+
+#[test]
 fn raw_binary_is_preserved_and_offsets_reconstruct_both_streams() {
     let temp = TempDir::new().unwrap();
     let root = temp.path().join("instance");

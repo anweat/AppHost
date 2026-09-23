@@ -59,6 +59,38 @@ pub fn read_window(
     to_ms: u128,
     max_bytes: usize,
 ) -> io::Result<LogWindow> {
+    read_bounded(root, from_ms, to_ms, max_bytes, false, false, None)
+}
+
+/// Keep the newest complete blocks for failure evidence under output floods.
+pub fn read_tail(
+    root: &Path,
+    from_ms: u128,
+    to_ms: u128,
+    max_bytes: usize,
+) -> io::Result<LogWindow> {
+    read_bounded(root, from_ms, to_ms, max_bytes, true, false, None)
+}
+
+pub fn read_stderr_tail(
+    root: &Path,
+    from_ms: u128,
+    to_ms: u128,
+    max_bytes: usize,
+    service_key: Option<&str>,
+) -> io::Result<LogWindow> {
+    read_bounded(root, from_ms, to_ms, max_bytes, true, true, service_key)
+}
+
+fn read_bounded(
+    root: &Path,
+    from_ms: u128,
+    to_ms: u128,
+    max_bytes: usize,
+    tail: bool,
+    stderr_only: bool,
+    service_key: Option<&str>,
+) -> io::Result<LogWindow> {
     if from_ms > to_ms || !(1..=1024 * 1024).contains(&max_bytes) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -147,9 +179,25 @@ pub fn read_window(
             if chunk.observed_ms < from_ms || chunk.observed_ms > to_ms {
                 continue;
             }
+            if stderr_only && chunk.stream != Stream::Stderr {
+                continue;
+            }
+            if service_key.is_some_and(|key| key != chunk.service_key) {
+                continue;
+            }
             if read_bytes + chunk.length > max_bytes || window.chunks.len() >= 4096 {
                 window.truncated = true;
-                return Ok(window);
+                if !tail {
+                    return Ok(window);
+                }
+                while !window.chunks.is_empty()
+                    && (read_bytes + chunk.length > max_bytes || window.chunks.len() >= 4096)
+                {
+                    read_bytes -= window.chunks.remove(0).length;
+                }
+                if chunk.length > max_bytes {
+                    continue;
+                }
             }
             let suffix = match chunk.stream {
                 Stream::Stdout => "out",

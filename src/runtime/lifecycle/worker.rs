@@ -157,6 +157,9 @@ fn spawn(manager: &Manager, h: &Handle, plan: LaunchPlan, live: &mut Live) -> Re
                 Ok(c) => c,
                 Err(e) => {
                     r.services[i].spawn_attempted = false;
+                    if r.status.failure.is_none() {
+                        r.failure_service = Some(r.services[i].name.clone());
+                    }
                     return Err(e);
                 }
             };
@@ -409,10 +412,16 @@ pub(super) fn run(
             r.services[i].ready = ready;
             r.services[i].group = Some(group.clone());
             if let Some(exit) = exit {
+                if r.status.failure.is_none() {
+                    r.failure_service = Some(r.services[i].name.clone());
+                }
                 r.services[i].exit = Some(exit);
                 r.status.fail("SERVICE_EXITED");
             }
             if members.is_empty() {
+                if r.status.failure.is_none() {
+                    r.failure_service = Some(r.services[i].name.clone());
+                }
                 r.services[i]
                     .exit
                     .get_or_insert(json!({"reason":"exit_status_unavailable"}));
@@ -427,10 +436,16 @@ pub(super) fn run(
                 if was_running
                     && miss.is_some_and(|since| since.elapsed() >= Duration::from_secs(10))
                 {
+                    if r.status.failure.is_none() {
+                        r.failure_service = Some(r.services[i].name.clone());
+                    }
                     r.status.fail("PORT_NOT_READY");
                 } else if r.status.state() == State::Starting
                     && started.elapsed() >= Duration::from_millis(r.services[i].startup_timeout_ms)
                 {
+                    if r.status.failure.is_none() {
+                        r.failure_service = Some(r.services[i].name.clone());
+                    }
                     r.status.fail("READINESS_TIMEOUT");
                 }
             }
@@ -469,6 +484,11 @@ pub(super) fn run(
                         .is_file())
             {
                 r.status.all_ready();
+                if r.status.state() == State::Running && r.reached_running_at_ms.is_none() {
+                    let at = now();
+                    r.reached_running_at_ms = Some(at);
+                    manager.failures.success(r.installation_id, at);
+                }
             }
             if matches!(r.status.state(), State::Running | State::Failed) {
                 r.operation_done = true;
@@ -478,6 +498,7 @@ pub(super) fn run(
                 save_record(&manager.data, &r)?;
             }
         }
+        manager.capture_failure(h, false);
         if !live.any() {
             return Ok(());
         }

@@ -154,6 +154,20 @@ fn load(data_dir: &Path) -> Result<Registry> {
     load_budgeted(data_dir, &mut remaining)
 }
 
+// Diagnostic redaction reads the confirmed snapshot without touching source trees.
+#[cfg(target_os = "macos")]
+pub(crate) fn confirmed_environment_values(data: &Path, id: Uuid) -> Result<Vec<String>> {
+    Ok(load(data)?
+        .installations
+        .into_iter()
+        .find(|i| i.installation_id == id)
+        .and_then(|i| i.confirmed_services)
+        .unwrap_or_default()
+        .into_iter()
+        .flat_map(|s| s.env.into_values())
+        .collect())
+}
+
 fn load_budgeted(data_dir: &Path, remaining: &mut u64) -> Result<Registry> {
     let path = data_dir.join("registry.json");
     let bytes = match storage::read_budgeted(&path, remaining) {

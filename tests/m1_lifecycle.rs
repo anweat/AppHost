@@ -22,6 +22,10 @@ fn service_fixture() {
             libc::signal(libc::SIGTERM, libc::SIG_IGN);
         }
     }
+    if std::env::var("FIXTURE_DEPENDENCY_ERROR").is_ok() {
+        eprintln!("ModuleNotFoundError: No module named 'gradio'");
+        eprintln!("Authorization: Bearer fixture-private-token");
+    }
     let mut listener = std::env::var("FIXTURE_PORT")
         .ok()
         .map(|p| TcpListener::bind(format!("127.0.0.1:{p}")).unwrap());
@@ -187,6 +191,79 @@ fn free_port() -> u16 {
         .local_addr()
         .unwrap()
         .port()
+}
+
+#[test]
+fn failure_evidence_is_retained_redacted_and_does_not_delay_stop() {
+    let mut f = Fixture::new();
+    let id = f.register(
+        json!({"FIXTURE_EXIT_MS":"120","FIXTURE_DEPENDENCY_ERROR":"yes"}),
+        None,
+        true,
+    );
+    f.boot();
+    f.rpc("start", json!({"installation_id":id}));
+    f.until(id, "FAILED");
+    wait(|| {
+        apphost::failure::read(&f.data, id, None)
+            .is_ok_and(|v| v["failure"]["evidence"]["code"] == "DEPENDENCY_MISSING")
+    });
+    let failure = apphost::failure::read(&f.data, id, None).unwrap();
+    assert_eq!(failure["failure"]["service"], "fixture/unsafe/path");
+    assert_eq!(failure["failure"]["phase"], "startup");
+    assert!(!failure.to_string().contains("fixture-private-token"));
+    assert_eq!(failure["failure"]["collecting"], true);
+    let begin = Instant::now();
+    f.rpc("stop", json!({"installation_id":id}));
+    f.until(id, "STOPPED");
+    assert!(begin.elapsed() < Duration::from_secs(4));
+    let failure_id = failure["failure"]["failure_id"].clone();
+    f.crash();
+    let offline = Command::new(env!("CARGO_BIN_EXE_apphost"))
+        .arg("--data-dir")
+        .arg(&f.data)
+        .arg("failure")
+        .arg(id.to_string())
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(offline.status.success());
+    assert!(offline.stderr.is_empty());
+    assert!(daemon::ping(&f.data).is_err());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&offline.stdout).unwrap()["failure"]["failure_id"],
+        failure_id
+    );
+    f.boot();
+    wait(|| {
+        apphost::failure::read(&f.data, id, None).is_ok_and(|v| {
+            v["failure"]["gaps"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("daemon_observation_gap"))
+        })
+    });
+    let recovered = apphost::failure::read(&f.data, id, None).unwrap();
+    assert_eq!(recovered["failure"]["failure_id"], failure_id);
+    assert_eq!(recovered["consecutive_same_cause"], 1);
+    assert_eq!(f.state(id)["status"]["state"], "STOPPED");
+}
+
+#[test]
+fn preflight_port_failure_has_no_instance_and_survives_without_a_worker() {
+    let mut f = Fixture::new();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let id = f.register(json!({}), Some(port), false);
+    f.boot();
+    let error = daemon::call(&f.data, "start", json!({"installation_id":id}), false).unwrap_err();
+    assert_eq!(error.code, "PORT_IN_USE");
+    assert!(error.details["failure_id"].is_string());
+    wait(|| apphost::failure::read(&f.data, id, None).is_ok());
+    let evidence = f.rpc("failure", json!({"installation_id":id}));
+    assert_eq!(evidence["failure"]["instance_id"], Value::Null);
+    assert_eq!(evidence["failure"]["evidence"]["code"], "PORT_IN_USE");
+    assert_eq!(evidence["failure"]["details"]["details"]["port"], port);
 }
 fn gone(pid: u32) -> bool {
     unsafe { libc::kill(pid as i32, 0) != 0 }

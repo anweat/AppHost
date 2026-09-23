@@ -29,6 +29,14 @@ enum Command {
     Restart { installation_id: Uuid },
     /// Read live state, or explicitly marked history while offline.
     Status { installation_id: Option<Uuid> },
+    /// Read retained failure evidence without starting the daemon or an App.
+    Failure {
+        installation_id: Uuid,
+        #[arg(long)]
+        failure_id: Option<Uuid>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Pause automatic wake and stop all managed instances.
     StopAll,
     /// Read a bounded observation window from the current instance.
@@ -235,6 +243,11 @@ fn run(cli: Cli) -> Result<Option<Value>> {
         Command::Status { installation_id } => {
             apphost::daemon::status(&data_dir(cli.data_dir)?, installation_id)
         }
+        Command::Failure {
+            installation_id,
+            failure_id,
+            json: _,
+        } => apphost::failure::read(&data_dir(cli.data_dir)?, installation_id, failure_id),
         Command::StopAll => {
             apphost::daemon::call(&data_dir(cli.data_dir)?, "stop-all", json!({}), true)
         }

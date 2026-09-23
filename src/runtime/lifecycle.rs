@@ -77,6 +77,14 @@ pub struct Record {
     pub status: InstanceStatus,
     pub created_at_ms: u128,
     pub updated_at_ms: u128,
+    #[serde(default)]
+    pub failure_id: Option<Uuid>,
+    #[serde(default)]
+    pub failure_at_ms: Option<u128>,
+    #[serde(default)]
+    pub failure_service: Option<String>,
+    #[serde(default)]
+    pub reached_running_at_ms: Option<u128>,
     pub services: Vec<ServiceRecord>,
     pub collector_attempted: bool,
     pub collector: Option<Group>,
@@ -133,6 +141,10 @@ fn new_record(id: Uuid, op: Uuid, plan: &LaunchPlan, epoch: u64) -> Record {
         status: InstanceStatus::default(),
         created_at_ms: now(),
         updated_at_ms: now(),
+        failure_id: None,
+        failure_at_ms: None,
+        failure_service: None,
+        reached_running_at_ms: None,
         services: plan
             .manifest()
             .services
@@ -256,8 +268,61 @@ pub(crate) struct Manager {
     startup_warnings: Vec<Value>,
     paused: AtomicBool,
     stop_epoch: AtomicU64,
+    failures: crate::failure::capture::Recorder,
 }
 impl Manager {
+    fn capture_failure(&self, h: &Handle, recovered: bool) {
+        let mut r = h.record.lock().unwrap();
+        // An explicit Stop may already have superseded FAILED by the time this
+        // observer runs. Preserve its sticky cause without undoing the stop intent.
+        if r.status.failure.is_none()
+            || r.status.failure.as_deref() == Some("START_CANCELLED")
+            || (!recovered && r.failure_id.is_some())
+        {
+            return;
+        }
+        if recovered
+            && let Some(fid) = r.failure_id
+            && crate::failure::read(&self.data, r.installation_id, Some(fid))
+                .ok()
+                .is_some_and(|v| v["failure"]["collecting"] == false)
+        {
+            return;
+        }
+        let at = *r.failure_at_ms.get_or_insert_with(now);
+        let fid = *r.failure_id.get_or_insert_with(Uuid::new_v4);
+        let mut failure = crate::failure::Failure::new(
+            r.installation_id,
+            r.status.failure.as_deref().unwrap_or("UNKNOWN"),
+            at,
+        );
+        failure.failure_id = fid;
+        failure.instance_id = Some(r.instance_id);
+        failure.service = r.failure_service.clone();
+        failure.phase = if r.reached_running_at_ms.is_some() {
+            "runtime"
+        } else {
+            "startup"
+        }
+        .into();
+        failure.evidence = crate::failure::classify(&failure.cause_code, &failure.phase, "");
+        failure.details = json!({"operation_error":r.operation_error,"services":r.services.iter().map(|s|json!({"name":s.name,"port":s.port,"exit":s.exit,"alive":s.alive,"ready":s.ready})).collect::<Vec<_>>()});
+        let job = crate::failure::capture::Incident {
+            failure,
+            services: r
+                .services
+                .iter()
+                .map(|s| (s.name.clone(), s.key.clone()))
+                .collect(),
+            log_incomplete: r.status.log_incomplete,
+            recovered,
+        };
+        if let Err(e) = save_record(&self.data, &r) {
+            r.warnings.push(json!({"code":"FAILURE_CAPTURE_INCOMPLETE","level":"warning","title":"Failure reference was not saved","evidence":{"error_code":e.code}}));
+        }
+        drop(r);
+        self.failures.incident(job);
+    }
     pub fn open(data: &Path) -> Result<Arc<Self>> {
         storage::private_directory(&data.join("runtime"))?;
         // The daemon singleton lock excludes any other runtime publisher.
@@ -329,6 +394,7 @@ impl Manager {
             startup_warnings,
             paused: AtomicBool::new(wake.paused),
             stop_epoch: AtomicU64::new(wake.stop_epoch),
+            failures: crate::failure::capture::Recorder::open(data.to_owned())?,
         });
         let mut recovered = Vec::new();
         for mut r in records {
@@ -378,6 +444,7 @@ impl Manager {
                 parked: Mutex::new(None),
             });
             manager.handles.lock().unwrap().insert(id, handle.clone());
+            manager.capture_failure(&handle, true);
             if live.any() || stopping {
                 recovered.push((handle, live));
             }
@@ -420,6 +487,7 @@ impl Manager {
                         }
                         let _ = save_record(&manager.data, &r);
                     }
+                    manager.capture_failure(&h, false);
                     let r = h.record.lock().unwrap();
                     // Close the worker/Stop admission race under the same mutex.
                     if h.control.load(Ordering::Acquire) != 0 {
@@ -444,11 +512,42 @@ impl Manager {
             .filter(|(key, _)| id.is_none_or(|id| id == **key))
             .map(|(_, h)| h.record.lock().unwrap().clone())
             .collect();
+        let mut warnings = self.startup_warnings.clone();
+        warnings.extend(self.failures.warnings());
         Ok(
-            json!({"live":true,"automatic_wake_paused":self.paused.load(Ordering::Acquire),"instances":records,"warnings":self.startup_warnings}),
+            json!({"live":true,"automatic_wake_paused":self.paused.load(Ordering::Acquire),"instances":records,"warnings":warnings}),
         )
     }
     pub fn start(self: &Arc<Self>, id: Uuid) -> Result<Value> {
+        let result = self.start_inner(id);
+        result.map_err(|mut error| {
+            if matches!(
+                error.code.as_str(),
+                "INVALID_COMMAND" | "PORT_IN_USE" | "PORT_CHECK_FAILED"
+            ) {
+                let mut failure = crate::failure::Failure::new(id, &error.code, now());
+                failure.details = json!(error);
+                failure.service = error
+                    .details
+                    .get("service")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let failure_id = failure.failure_id;
+                self.failures.incident(crate::failure::capture::Incident {
+                    failure,
+                    services: vec![],
+                    log_incomplete: false,
+                    recovered: false,
+                });
+                if !error.details.is_object() {
+                    error.details = json!({"evidence":error.details});
+                }
+                error.details["failure_id"] = json!(failure_id);
+            }
+            error
+        })
+    }
+    fn start_inner(self: &Arc<Self>, id: Uuid) -> Result<Value> {
         let epoch = self.stop_epoch.load(Ordering::Acquire);
         if let Some(h) = self.handles.lock().unwrap().get(&id) {
             let r = h.record.lock().unwrap();
@@ -514,10 +613,13 @@ impl Manager {
                             "PORT_IN_USE",
                             "Port reserved by an AppHost instance",
                         )
-                        .details(json!({"port":port,"installation_id":r.installation_id})));
+                        .details(json!({"port":port,"installation_id":r.installation_id,"service":service.name})));
                     }
                 }
-                port_available(port)?;
+                port_available(port).map_err(|mut e| {
+                    e.details["service"] = json!(service.name);
+                    e
+                })?;
             }
         }
         if let Some(old) = handles.get(&id) {
@@ -727,6 +829,12 @@ impl Manager {
             to_ms: u128,
             limit: usize,
         }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct FailureQuery {
+            installation_id: Uuid,
+            failure_id: Option<Uuid>,
+        }
         fn params<T: serde::de::DeserializeOwned>(v: &Value) -> Result<T> {
             serde_json::from_value(v.clone())
                 .map_err(|_| Error::new("INVALID_PARAMS", "Invalid runtime method parameters"))
@@ -772,6 +880,10 @@ impl Manager {
                     p.to_ms,
                     p.limit,
                 )
+            }
+            "failure" => {
+                let p = params::<FailureQuery>(&request.params)?;
+                crate::failure::read(&self.data, p.installation_id, p.failure_id)
             }
             _ => Err(Error::new(
                 "METHOD_NOT_FOUND",

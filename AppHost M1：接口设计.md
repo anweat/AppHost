@@ -171,6 +171,18 @@ wake.json 缺失且存在运行记录时，以最大 operation_epoch 加一恢�
 
 新实例替换已完成实例前，保存旧实例的只读 record.json，历史日志仍按 installation_id / instance_id 校验归属读取。启动和完整重启时清理过期或超量的普通归档：安装预算为 100 MiB，给当前实例预留 9 MiB，旧归档按创建时间淘汰并应用 7 天年龄上限；不删除活动或管理权不确定的实例。扫描上限 4096 个实例目录、15000 个归档条目；异常目录、链接或超限明确失败，不猜测归属。普通日志归档不承载 D9 的独立失败现场。
 
+### 独立失败现场
+
+`failure` 接受 installation_id 和可选 failure_id；不指定 failure_id 时读取最近一次失败。CLI `apphost failure <installation_id> [--failure-id <uuid>] [--json]` 直接读取持久化现场，不启动 daemon 或 App。响应包含 failure、history、details_expired 和连续同因观察次数。没有现场目录时返回 NOT_FOUND；已知现场超过保留期限时返回 failure=null、details_expired=true，保留最近失败的摘要。损坏的权威记录明确失败，不当成空历史。
+
+现场位于 `<data>/failures/<installation_id>/<failure_id>.json`，schema_version 为 1。记录包含安装、实例（预检失败可以为空）、服务、phase（preflight/startup/runtime）、观察时间、底层 cause_code、分类 evidence、脱敏详情、日志快照、stderr_tail、collecting 与 gaps。evidence 带 code、rule_id、inferred、匹配片段和所检查 stderr 文本中的行号；具体依赖、端口或版本错误优先于泛化退出，运行中的普通退出归 UNKNOWN。运行状态中的底层失败原因继续保留，分类结果不改写生命周期。
+
+daemon 使用一条独立的有界采集队列（64 项），最多保留 32 个待补尾窗口；空闲时阻塞等待。生命周期不等待失败后的 10 秒，容量或 IO 错误通过 status.warnings 报告 FAILURE_CAPTURE_INCOMPLETE。首先保存可读现场，再异步补齐观察区间 `[失败时间-30秒, 失败时间+10秒]`。初次与最终日志分别标记 initial/tail，可能重叠，不伪装成去重后的连续日志。每次日志快照读取至多 64 KiB 原始字节，stderr 独立保留至多 32 KiB 的最新字节用于分类，以免 stdout 洪泛挤掉报错；展示的 stderr 尾部至多 8192 字符。跨采集块的文本先按服务和流合并，再匹配和脱敏。
+
+环境确认快照中的值、凭据特征行和本机用户路径默认脱敏；任意程序输出无法保证完全识别，返回 redaction 提示供分享前复核。JSON 转义和脱敏可能扩大正文，最终现场受 900 KiB 上限约束，必要时截断输出并记录 evidence_byte_limit，为 1 MiB RPC 信封预留空间。读取、轮转、采集器退出和 daemon 恢复的缺口均显式标记。daemon 离线且补尾期限已过时，读取将未完成的 collecting 显示为 false，并添加 tail_capture_not_completed，不永远显示采集中。
+
+写入时按每安装最多 20 条、30 天清理，读取不创建目录、不清理文件。最后失败引用与最近成功时间保存在独立 history.json 中，普通日志被清理不影响已保存的现场；迟到的补尾不能重新插入已被较新失败淘汰的记录。连续同因次数从上次成功之后的留存记录计算；达到留存边界时 count_limited_by_retention=true，调用方只能将该值显示为下界，不能声称完整历史次数。
+
 运行状态仅 STOPPED / STARTING / RUNNING / STOPPING / FAILED；就绪、退出原因和 management_uncertain 为附加信息。操作 ID 用来关联长请求，不另建持久化任务状态机。
 
 请求采用 JSON Lines：`{version, request_id, method, params}`；响应回显 request_id，成功返回 result，错误返回沿用 M0 的 `{error:{code,message,details}}`。长操作返回 operation_id 后通过状态查询/事件获得结果；断连不取消已接受的操作。事件游标与快照绑定，过期游标要求重新读取快照。
