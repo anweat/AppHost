@@ -141,7 +141,9 @@ fn spawn(manager: &Manager, h: &Handle, plan: LaunchPlan, live: &mut Live) -> Re
             .enumerate()
         {
             let mut r = h.record.lock().unwrap();
-            if h.control.load(Ordering::Acquire) != 0 {
+            if h.control.load(Ordering::Acquire) != 0
+                || r.operation_epoch != manager.stop_epoch.load(Ordering::Acquire)
+            {
                 break;
             }
             r.services[i].spawn_attempted = true;
@@ -249,6 +251,16 @@ pub(super) fn run(
     let mut misses: [Option<Instant>; 32] = [None; 32];
     let mut next_observation = Instant::now();
     loop {
+        let coordinating = coordination::pending(&h.record.lock().unwrap());
+        if coordinating && h.control.load(Ordering::Acquire) == 0 {
+            plan = coordination::wait_for_owner(manager, h)?;
+            if plan.is_none() && h.control.load(Ordering::Acquire) == 0 {
+                return Err(Error::new(
+                    "START_CANCELLED",
+                    "StopAll cancelled the pending target",
+                ));
+            }
+        }
         if let Some(prepared) = plan.take()
             && h.control.load(Ordering::Acquire) == 0
         {

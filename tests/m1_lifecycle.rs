@@ -1395,3 +1395,138 @@ fn offline_status_reports_directory_warnings_as_json_without_stderr() {
         json!([])
     );
 }
+
+#[test]
+fn compound_start_stops_only_the_selected_owner_and_merges_repeats() {
+    let mut f = Fixture::new();
+    let port = free_port();
+    let owner = f.register(
+        json!({"FIXTURE_PORT":port.to_string(),"FIXTURE_IGNORE_TERM":"1"}),
+        Some(port),
+        false,
+    );
+    let target = f.register(json!({"FIXTURE_PORT":port.to_string()}), Some(port), false);
+    f.boot();
+    f.rpc("start", json!({"installation_id":owner}));
+    let old = f.until(owner, "RUNNING");
+    let p = json!({"installation_id":target,"owner_installation_id":owner,"owner_instance_id":old["instance_id"]});
+    let first = f.rpc("stop-owner-and-start", p.clone());
+    assert_eq!(first["operation_phase"], "stopping_owner");
+    let duplicate = f.rpc("stop-owner-and-start", p);
+    assert_eq!(first["operation_id"], duplicate["operation_id"]);
+    let ready = f.until(target, "RUNNING");
+    assert_eq!(ready["operation_id"], first["operation_id"]);
+    assert_eq!(ready["pending_owner"]["stopped"], true);
+    assert_eq!(f.until(owner, "STOPPED")["instance_id"], old["instance_id"]);
+    let journal = f.rpc("journal", json!({"limit":100}));
+    let facts: Vec<_> = journal["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["operation_id"] == first["operation_id"])
+        .collect();
+    assert_eq!(facts.len(), 2);
+    assert_eq!(facts[1]["outcome"], "succeeded");
+}
+
+#[test]
+fn compound_start_rejects_stale_or_unrelated_owner_without_stopping_it() {
+    let mut f = Fixture::new();
+    let port = free_port();
+    let owner = f.register(json!({"FIXTURE_PORT":port.to_string()}), Some(port), false);
+    let target = f.register(json!({}), None, false);
+    f.boot();
+    f.rpc("start", json!({"installation_id":owner}));
+    let old = f.until(owner, "RUNNING");
+    for (instance, code) in [
+        (json!(Uuid::new_v4()), "OWNER_CHANGED"),
+        (old["instance_id"].clone(), "OWNER_NOT_PROVEN"),
+    ] {
+        let error = daemon::call(&f.data,"stop-owner-and-start",json!({"installation_id":target,"owner_installation_id":owner,"owner_instance_id":instance}),false).unwrap_err();
+        assert_eq!(error.code, code);
+        assert_eq!(f.state(owner)["status"]["state"], "RUNNING");
+        assert!(f.state(target).is_null());
+    }
+}
+
+#[test]
+fn compound_start_stop_all_cancels_target_before_spawn() {
+    let mut f = Fixture::new();
+    let port = free_port();
+    let owner = f.register(
+        json!({"FIXTURE_PORT":port.to_string(),"FIXTURE_IGNORE_TERM":"1"}),
+        Some(port),
+        false,
+    );
+    let target = f.register(json!({"FIXTURE_PORT":port.to_string()}), Some(port), false);
+    f.boot();
+    f.rpc("start", json!({"installation_id":owner}));
+    let old = f.until(owner, "RUNNING");
+    f.rpc("stop-owner-and-start",json!({"installation_id":target,"owner_installation_id":owner,"owner_instance_id":old["instance_id"]}));
+    wait(|| f.state(owner)["status"]["state"] == "STOPPING");
+    f.rpc("stop-all", json!({}));
+    let stopped = f.until(target, "STOPPED");
+    assert_eq!(stopped["services"][0]["spawn_attempted"], false);
+    assert_eq!(stopped["collector_attempted"], false);
+    f.until(owner, "STOPPED");
+    f.crash();
+    f.boot();
+    assert_eq!(f.state(target)["status"]["state"], "STOPPED");
+}
+
+#[test]
+fn compound_start_recovers_stop_intent_without_duplicate_target() {
+    let mut f = Fixture::new();
+    let port = free_port();
+    let owner = f.register(
+        json!({"FIXTURE_PORT":port.to_string(),"FIXTURE_IGNORE_TERM":"1"}),
+        Some(port),
+        false,
+    );
+    let target = f.register(json!({"FIXTURE_PORT":port.to_string()}), Some(port), false);
+    f.boot();
+    f.rpc("start", json!({"installation_id":owner}));
+    let old = f.until(owner, "RUNNING");
+    let accepted = f.rpc("stop-owner-and-start",json!({"installation_id":target,"owner_installation_id":owner,"owner_instance_id":old["instance_id"]}));
+    wait(|| f.state(owner)["status"]["state"] == "STOPPING");
+    f.crash();
+    f.boot();
+    let ready = f.until(target, "RUNNING");
+    assert_eq!(ready["operation_id"], accepted["operation_id"]);
+    assert_eq!(ready["instance_id"], accepted["instance_id"]);
+    f.until(owner, "STOPPED");
+}
+
+#[test]
+fn compound_start_revalidates_target_and_missing_wake_cancels_continuation() {
+    for remove_wake in [false, true] {
+        let mut f = Fixture::new();
+        let port = free_port();
+        let owner = f.register(
+            json!({"FIXTURE_PORT":port.to_string(),"FIXTURE_IGNORE_TERM":"1"}),
+            Some(port),
+            false,
+        );
+        let target = f.register(json!({"FIXTURE_PORT":port.to_string()}), Some(port), false);
+        f.boot();
+        f.rpc("start", json!({"installation_id":owner}));
+        let old = f.until(owner, "RUNNING");
+        f.rpc("stop-owner-and-start",json!({"installation_id":target,"owner_installation_id":owner,"owner_instance_id":old["instance_id"]}));
+        wait(|| f.state(owner)["status"]["state"] == "STOPPING");
+        if remove_wake {
+            f.crash();
+            fs::remove_file(f.data.join("wake.json")).unwrap();
+            f.boot();
+            assert_eq!(f.rpc("status", json!({}))["automatic_wake_paused"], true);
+        } else {
+            apphost::label(&f.data, target, "changed while waiting").unwrap();
+        }
+        let result = f.until(target, if remove_wake { "STOPPED" } else { "FAILED" });
+        assert_eq!(result["services"][0]["spawn_attempted"], false);
+        assert_eq!(result["collector_attempted"], false);
+        if !remove_wake {
+            assert_eq!(result["operation_error"]["code"], "STALE_LAUNCH");
+        }
+        f.until(owner, "STOPPED");
+    }
+}

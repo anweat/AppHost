@@ -23,6 +23,14 @@ enum Command {
     InternalCollect { root: PathBuf, descriptors: String },
     /// Start a confirmed installation (starts the daemon if needed).
     Start { installation_id: Uuid },
+    /// Stop the specified managed owner, then recheck and start the target.
+    StopOwnerAndStart {
+        installation_id: Uuid,
+        #[arg(long)]
+        owner_installation_id: Uuid,
+        #[arg(long)]
+        owner_instance_id: Uuid,
+    },
     /// Stop all verified process groups belonging to an installation.
     Stop { installation_id: Uuid },
     /// Stop the old instance before preparing and starting a new one.
@@ -334,6 +342,16 @@ fn run_command(cli: Cli) -> Result<Option<Value>> {
             &data_dir(cli.data_dir)?,
             "start",
             json!({"installation_id":installation_id}),
+            true,
+        ),
+        Command::StopOwnerAndStart {
+            installation_id,
+            owner_installation_id,
+            owner_instance_id,
+        } => apphost::daemon::call(
+            &data_dir(cli.data_dir)?,
+            "stop-owner-and-start",
+            json!({"installation_id":installation_id,"owner_installation_id":owner_installation_id,"owner_instance_id":owner_instance_id}),
             true,
         ),
         Command::Stop { installation_id } => apphost::daemon::call(

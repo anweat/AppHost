@@ -503,7 +503,7 @@ pub(super) fn serve(data_dir: &Path) -> Result<()> {
     let manager = crate::runtime::lifecycle::Manager::open(&data_dir)?;
     let hello = Arc::new(
         json!({"protocol_version":protocol::VERSION,"daemon_id":manager.events.cursor().daemon_id,
-        "pid":std::process::id(),"data_dir":*data_dir,"capabilities":["hello","check-launch","start","stop","restart","status","stop-all","logs","detach","relink","failure","journal","resume-wake","history","subscribe","logs-follow"]}),
+        "pid":std::process::id(),"data_dir":*data_dir,"capabilities":["hello","check-launch","start","stop-owner-and-start","stop","restart","status","stop-all","logs","detach","relink","failure","journal","resume-wake","history","subscribe","logs-follow"]}),
     );
     let clients = Arc::new(AtomicUsize::new(0));
     let subscriptions = Arc::new(AtomicUsize::new(0));
@@ -561,7 +561,14 @@ fn rpc(data_dir: &Path, method: &str, params: Value) -> Result<Value> {
         json!({"version":protocol::VERSION,"request_id":id,"method":method,"params":params});
     if matches!(
         method,
-        "start" | "stop" | "restart" | "detach" | "relink" | "stop-all" | "resume-wake"
+        "start"
+            | "stop"
+            | "restart"
+            | "stop-owner-and-start"
+            | "detach"
+            | "relink"
+            | "stop-all"
+            | "resume-wake"
     ) {
         let actor = crate::journal::Actor::from_environment()?;
         if !actor.is_human() {
@@ -719,7 +726,14 @@ pub(super) fn call(data_dir: &Path, method: &str, params: Value, autostart: bool
     let actor = if autostart
         || matches!(
             method,
-            "start" | "stop" | "restart" | "detach" | "relink" | "stop-all" | "resume-wake"
+            "start"
+                | "stop"
+                | "restart"
+                | "stop-owner-and-start"
+                | "detach"
+                | "relink"
+                | "stop-all"
+                | "resume-wake"
         ) {
         crate::journal::Actor::from_environment()?
     } else {

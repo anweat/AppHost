@@ -76,8 +76,10 @@ pub(super) fn complete(r: &mut Record) {
                 .flatten()
         });
     let outcome = if code.as_deref() == Some("START_CANCELLED")
-        || (matches!(operation.action.as_str(), "start" | "restart")
-            && r.status.state() == State::Stopped
+        || (matches!(
+            operation.action.as_str(),
+            "start" | "restart" | "stop-owner-and-start"
+        ) && r.status.state() == State::Stopped
             && code.is_none())
     {
         Outcome::Canceled

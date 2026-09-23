@@ -25,6 +25,7 @@ use std::{
 use uuid::Uuid;
 
 mod audit;
+mod coordination;
 mod worker;
 use worker::{Live, run};
 
@@ -79,6 +80,8 @@ pub struct Record {
     #[serde(default)]
     pub warnings: Vec<Value>,
     pub pending_mutation: Option<Mutation>,
+    #[serde(default)]
+    pub pending_owner: Option<coordination::PendingOwner>,
     pub restart_after_stop: bool,
     pub status: InstanceStatus,
     pub created_at_ms: u128,
@@ -192,6 +195,7 @@ fn new_record(id: Uuid, op: Uuid, plan: &LaunchPlan, epoch: u64) -> Record {
         journal_pending: Vec::new(),
         warnings: Vec::new(),
         pending_mutation: None,
+        pending_owner: None,
         restart_after_stop: false,
         status: InstanceStatus::default(),
         created_at_ms: now(),
@@ -263,13 +267,20 @@ fn load_records(data: &Path) -> Result<(Vec<Record>, Vec<Value>)> {
             || r.services.is_empty()
             || r.services.len() > 32
             || r.journal_pending.len() > 32
+            || r.pending_owner.as_ref().is_some_and(|p| {
+                p.installation_id == r.installation_id
+                    || p.ports.is_empty()
+                    || p.ports.len() > 32
+                    || p.ports.contains(&0)
+                    || p.original_operation_id == p.stop_operation_id
+            })
             || r.journal_pending
                 .iter()
                 .any(|e| !e.valid() || e.installation_id != Some(r.installation_id))
             || r.audit.as_ref().is_some_and(|a| {
                 !matches!(
                     a.action.as_str(),
-                    "start" | "stop" | "restart" | "detach" | "relink"
+                    "start" | "stop" | "restart" | "stop-owner-and-start" | "detach" | "relink"
                 )
             })
             || r.services.iter().enumerate().any(|(i, s)| {
@@ -448,6 +459,10 @@ impl Manager {
             // so another recovery safely repeats from the largest saved epoch.
             for r in &mut records {
                 r.operation_epoch = wake.stop_epoch;
+                if r.pending_owner.take().is_some() && !r.collector_attempted {
+                    r.status.request_stop();
+                    r.restart_after_stop = false;
+                }
                 if r.restart_after_stop {
                     r.restart_after_stop = false;
                     r.operation_error = Some(json!(Error::new(
@@ -487,6 +502,7 @@ impl Manager {
                 // but before updating any per-installation record.
                 r.operation_epoch = wake.stop_epoch;
                 r.restart_after_stop = false;
+                r.pending_owner = None;
                 if live.any() || r.management_uncertain || r.status.state() != State::Stopped {
                     // Recovery completes StopAll's interrupted dispatch. Close the
                     // previous operation before assigning a new system stop ID.
@@ -503,6 +519,7 @@ impl Manager {
                 && r.status.state() != State::Stopping
                 && !live.any()
                 && !r.management_uncertain
+                && !coordination::pending(&r)
             {
                 // A dead failed instance is still evidence requiring attention.
                 if r.status.state() != State::Failed {
@@ -512,6 +529,7 @@ impl Manager {
             }
             save_record(data, &mut r, &events)?;
             let id = r.installation_id;
+            let coordinating = coordination::pending(&r);
             let stopping = r.status.state() == State::Stopping
                 || (!r.operation_done && (r.pending_mutation.is_some() || r.restart_after_stop));
             let control = if stopping {
@@ -527,7 +545,7 @@ impl Manager {
             });
             manager.handles.lock().unwrap().insert(id, handle.clone());
             manager.capture_failure(&handle, true);
-            if live.any() || stopping {
+            if live.any() || stopping || coordinating {
                 recovered.push((handle, live));
             }
         }
@@ -608,7 +626,7 @@ impl Manager {
         self.launch(id, actor, "start")
     }
     fn launch(self: &Arc<Self>, id: Uuid, actor: Actor, action: &str) -> Result<Value> {
-        let result = self.start_inner(id, actor, action);
+        let result = self.start_inner(id, actor, action, None);
         result.map_err(|mut error| {
             if matches!(
                 error.code.as_str(),
@@ -636,14 +654,20 @@ impl Manager {
             error
         })
     }
-    fn start_inner(self: &Arc<Self>, id: Uuid, actor: Actor, action: &str) -> Result<Value> {
+    fn start_inner(
+        self: &Arc<Self>,
+        id: Uuid,
+        actor: Actor,
+        action: &str,
+        owner: Option<(Uuid, Uuid)>,
+    ) -> Result<Value> {
         let epoch = self.stop_epoch.load(Ordering::Acquire);
         if let Some(h) = self.handles.lock().unwrap().get(&id) {
             let r = h.record.lock().unwrap();
             if matches!(r.status.state(), State::Starting | State::Running)
                 && h.working.load(Ordering::Acquire)
             {
-                return Ok(receipt(&r));
+                return coordination::merge(&r, owner);
             }
         }
         // Preparation may touch a slow source directory. It never holds the
@@ -655,7 +679,16 @@ impl Manager {
                 "At most 32 services per instance",
             ));
         }
+        let pending_owner = owner
+            .map(|(owner_id, instance)| coordination::prepare(self, id, owner_id, instance, &plan))
+            .transpose()?;
         let mut handles = self.handles.lock().unwrap();
+        if let Some(pending) = &pending_owner {
+            let owner = handles
+                .get(&pending.installation_id)
+                .ok_or_else(coordination::owner_changed)?;
+            pending.validate(&owner.record.lock().unwrap())?;
+        }
         if epoch != self.stop_epoch.load(Ordering::Acquire) {
             return Err(Error::new(
                 "START_CANCELLED",
@@ -667,7 +700,7 @@ impl Manager {
             if matches!(r.status.state(), State::Starting | State::Running)
                 && h.working.load(Ordering::Acquire)
             {
-                return Ok(receipt(&r));
+                return coordination::merge(&r, owner);
             }
             if r.management_uncertain || r.services.iter().any(|s| s.alive) || r.collector_alive {
                 return Err(Error::new(
@@ -693,8 +726,15 @@ impl Manager {
         }
         for service in &plan.manifest().services {
             if let Some(port) = service.port {
+                let mut owned = false;
                 for h in handles.values() {
                     let r = h.record.lock().unwrap();
+                    if pending_owner.as_ref().is_some_and(|p| {
+                        p.installation_id == r.installation_id && p.ports.contains(&port)
+                    }) {
+                        owned = true;
+                        continue;
+                    }
                     if r.services.iter().any(|s| {
                         s.port == Some(port) && (s.alive || r.status.state() == State::Starting)
                     }) {
@@ -702,13 +742,15 @@ impl Manager {
                             "PORT_IN_USE",
                             "Port reserved by an AppHost instance",
                         )
-                        .details(json!({"port":port,"installation_id":r.installation_id,"service":service.name})));
+                        .details(json!({"port":port,"installation_id":r.installation_id,"instance_id":r.instance_id,"service":service.name})));
                     }
                 }
-                port_available(port).map_err(|mut e| {
-                    e.details["service"] = json!(service.name);
-                    e
-                })?;
+                if !owned {
+                    port_available(port).map_err(|mut e| {
+                        e.details["service"] = json!(service.name);
+                        e
+                    })?;
+                }
             }
         }
         if let Some(old) = handles.get(&id) {
@@ -718,6 +760,7 @@ impl Manager {
         if let Some(old) = handles.get(&id) {
             record.journal_pending = old.record.lock().unwrap().journal_pending.clone();
         }
+        record.pending_owner = pending_owner;
         audit::begin(&mut record, action, actor);
         save_record(&self.data, &mut record, &self.events)?;
         let result = receipt(&record);
@@ -732,7 +775,7 @@ impl Manager {
         Ok(result)
     }
     pub fn stop(self: &Arc<Self>, id: Uuid, restart: bool, actor: Actor) -> Result<Value> {
-        self.request_stop(id, restart, None, actor)
+        self.request_stop(id, restart, None, actor, None)
     }
     pub fn mutate(self: &Arc<Self>, id: Uuid, mutation: Mutation, actor: Actor) -> Result<Value> {
         let handles = self.handles.lock().unwrap();
@@ -740,7 +783,7 @@ impl Manager {
             return mutation.apply(&self.data, id);
         }
         drop(handles);
-        self.request_stop(id, false, Some(mutation), actor)
+        self.request_stop(id, false, Some(mutation), actor, None)
     }
     fn request_stop(
         self: &Arc<Self>,
@@ -748,9 +791,13 @@ impl Manager {
         restart: bool,
         mutation: Option<Mutation>,
         actor: Actor,
+        expected: Option<&coordination::PendingOwner>,
     ) -> Result<Value> {
         let h = self.handles.lock().unwrap().get(&id).cloned();
         let Some(h) = h else {
+            if expected.is_some() {
+                return Err(coordination::owner_changed());
+            }
             return if restart {
                 self.launch(id, actor, "restart")
             } else {
@@ -758,6 +805,13 @@ impl Manager {
             };
         };
         let mut r = h.record.lock().unwrap();
+        if let Some(expected) = expected {
+            if r.instance_id == expected.instance_id && r.operation_id == expected.stop_operation_id
+            {
+                return Ok(receipt(&r));
+            }
+            expected.validate(&r)?;
+        }
         if r.status.state() == State::Stopping && h.working.load(Ordering::Acquire) {
             if mutation.is_some() {
                 return Err(Error::new(
@@ -779,7 +833,8 @@ impl Manager {
             return Ok(receipt(&r));
         }
         audit::cancel(&mut r);
-        r.operation_id = Uuid::new_v4();
+        r.operation_id = expected.map_or_else(Uuid::new_v4, |p| p.stop_operation_id);
+        r.pending_owner = None;
         r.operation_epoch = self.stop_epoch.load(Ordering::Acquire);
         r.operation_done = false;
         r.operation_error = None;
@@ -936,7 +991,7 @@ impl Manager {
     }
 }
 fn receipt(r: &Record) -> Value {
-    json!({"installation_id":r.installation_id,"instance_id":r.instance_id,"operation_id":r.operation_id,"operation_done":r.operation_done,"state":r.status.state(),"warnings":r.warnings})
+    json!({"installation_id":r.installation_id,"instance_id":r.instance_id,"operation_id":r.operation_id,"operation_done":r.operation_done,"state":r.status.state(),"warnings":r.warnings,"operation_phase":coordination::phase(r)})
 }
 fn port_available(port: u16) -> Result<()> {
     // macOS permits a reusable wildcard bind beside a specific-address listener
@@ -958,7 +1013,14 @@ impl Manager {
         let mut result = self.dispatch_inner(request);
         if matches!(
             request.method.as_str(),
-            "start" | "stop" | "restart" | "detach" | "relink" | "stop-all" | "resume-wake"
+            "start"
+                | "stop"
+                | "restart"
+                | "stop-owner-and-start"
+                | "detach"
+                | "relink"
+                | "stop-all"
+                | "resume-wake"
         ) {
             // Durable installation operations record acceptance and completion in
             // save_record. Rejections, no-ops and global commands finish here.
@@ -1055,6 +1117,22 @@ impl Manager {
                 .map_err(|_| Error::new("INVALID_PARAMS", "Invalid runtime method parameters"))
         }
         match request.method.as_str() {
+            "stop-owner-and-start" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Compound {
+                    installation_id: Uuid,
+                    owner_installation_id: Uuid,
+                    owner_instance_id: Uuid,
+                }
+                let p = params::<Compound>(&request.params)?;
+                self.start_inner(
+                    p.installation_id,
+                    request.actor,
+                    "stop-owner-and-start",
+                    Some((p.owner_installation_id, p.owner_instance_id)),
+                )
+            }
             "start" => self.start(
                 params::<Installation>(&request.params)?.installation_id,
                 request.actor,

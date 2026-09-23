@@ -248,6 +248,13 @@ CLI `journal [--cursor <event_id>] [--limit <1..200>] [--json]` 和同名 RPC �
 - 自上次成功以来的变化：成功时记录分支、声明摘要及其确认来源（发起者）和运行环境基线版本（冻结稿 9.5），失败详情与当前值比较；没有记录的项不显示，不猜测。
 - 启动进度：STARTING 期间提供 started_at 与有效 startup_timeout_ms，用于显示已等待时间和期限。
 - "停止它并启动"作为一个复合操作（D10），回执区分停止占用者与启动两个阶段。
+
+`stop-owner-and-start` 接收 `installation_id`（目标）、`owner_installation_id`、`owner_instance_id`。只接受当前进程身份能够证明拥有目标声明端口的受管实例；占用提示中的旧 instance_id 不授予停止新实例的权限。目标先保存复合操作意图及预分配的占用者 stop operation_id，再提交停止；重复的同目标、同占用实例请求合并，目标已有其他操作时返回 BUSY。回执 `operation_phase` 为 stopping_owner / starting_target / complete，后续快照中的 pending_owner.stopped 表示停止阶段是否完成。沿用五态，不增加独立工作流状态机。
+
+占用者成功 STOPPED 后重新准备目标、检查每安装 revision 和全部声明端口，再由现有启动快照复核后派发。等待期限为占用者各服务停止期限加每服务 2 秒强制退出核验及 10 秒采集/协调余量；本次等待使用单调时间，恢复不延长已保存期限。OWNER_CHANGED、OWNER_NOT_PROVEN、OWNER_STOP_FAILED、OWNER_STOP_TIMEOUT、STALE_LAUNCH 均结束本次操作，不自动循环。两个安装以短的全局入队门协调，一次只锁一个安装记录，等待时不持有全局门或占用者记录锁；跨安装操作不会互相持锁等待。
+
+daemon 恢复只续接尚未派发采集器和服务的已保存目标意图，利用预分配的 stop operation_id 识别停止是否已接受；已有派发意图仍按原有身份核验规则处理，不重复启动。Stop All、显式停止目标或缺失 wake.json 的保守恢复取消后半段；已经接受的占用者停止继续完成。
+
 - 批量结果：stop-all 逐项返回 stopped、failed（原因）、canceled（取消的待启动）和 orphan（身份无法确认、未结束的进程及证据）。分组只是 ui.json 的外观数据，daemon 不感知分组：分组启停由桌面端对各安装分别发起 start / stop，在本地聚合为一次活动区结果，skipped（待确认、源码缺失）由桌面端在发起前判定。
 
 展示组件只接收数据并发出用户动作，不独立管理运行状态或排序。磁贴按安装展示顺序渲染，启动结果、失败、日志刷新不改变顺序。日志刷新仅在显式操作时读取当前安装的日志窗口，保留刷新时间与离线反馈；命令行组件在原型中只演示项目目录与系统终端入口，不提供嵌入式 shell，也不旁路核心执行启动命令。正式终端桥接随桌面接口设计确定。

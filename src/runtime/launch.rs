@@ -78,6 +78,10 @@ impl LaunchPlan {
         self.snapshot.manifest()
     }
 
+    pub fn revision(&self) -> u64 {
+        self.snapshot.installation().revision
+    }
+
     pub fn context(&self) -> crate::failure::LaunchContext {
         context(
             &self.snapshot.installation().path,
