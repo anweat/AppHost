@@ -194,6 +194,57 @@ fn free_port() -> u16 {
 }
 
 #[test]
+fn success_baseline_and_finished_history_survive_restart_and_explain_changes() {
+    let mut f = Fixture::new();
+    let id = f.register(json!({}), None, false);
+    let root = apphost::registry::registered(&f.data, id).unwrap().path;
+    fs::create_dir(root.join(".git")).unwrap();
+    fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    f.boot();
+    f.rpc("start", json!({"installation_id":id}));
+    f.until(id, "RUNNING");
+    let history = f.rpc("history", json!({"installation_id":id}));
+    assert_eq!(history["last_success_context"]["branch"], "main");
+    assert!(history["last_success_at_ms"].is_number());
+    f.rpc("stop", json!({"installation_id":id}));
+    f.until(id, "STOPPED");
+    let finished = f.rpc("history", json!({"installation_id":id}));
+    assert!(finished["last_finished_at_ms"].is_number());
+    fs::write(root.join(".git/HEAD"), "ref: refs/heads/changed\n").unwrap();
+    apphost::environment::save_path(&f.data, "/bin".into()).unwrap();
+    let details = f.rpc("failure", json!({"installation_id":id}));
+    assert!(
+        details["changes_since_success"]["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["field"] == "branch")
+    );
+    assert!(
+        details["changes_since_success"]["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["field"] == "environment_sha256")
+    );
+    f.crash();
+    let offline = Command::new(env!("CARGO_BIN_EXE_apphost"))
+        .arg("--data-dir")
+        .arg(&f.data)
+        .args(["history", &id.to_string()])
+        .output()
+        .unwrap();
+    assert!(offline.status.success());
+    assert!(offline.stderr.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&offline.stdout).unwrap(),
+        finished
+    );
+    f.boot();
+    assert_eq!(f.rpc("history", json!({"installation_id":id})), finished);
+}
+
+#[test]
 fn journal_separates_acceptance_completion_and_cancellation_with_persisted_actor() {
     let mut f = Fixture::new();
     let id = f.register(json!({}), None, false);

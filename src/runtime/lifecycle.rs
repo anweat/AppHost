@@ -91,6 +91,10 @@ pub struct Record {
     pub failure_service: Option<String>,
     #[serde(default)]
     pub reached_running_at_ms: Option<u128>,
+    #[serde(default)]
+    pub finished_at_ms: Option<u128>,
+    #[serde(default)]
+    pub launch_context: Option<crate::failure::LaunchContext>,
     pub services: Vec<ServiceRecord>,
     pub collector_attempted: bool,
     pub collector: Option<Group>,
@@ -129,12 +133,47 @@ fn log_path(data: &Path, r: &Record) -> PathBuf {
         .join("logs")
 }
 fn save_record(data: &Path, r: &mut Record) -> Result<()> {
+    if r.finished_at_ms.is_none()
+        && r.operation_done
+        && !r.collector_alive
+        && r.services.iter().all(|s| !s.alive)
+        && !r.management_uncertain
+        && matches!(r.status.state(), State::Stopped | State::Failed)
+    {
+        r.finished_at_ms = Some(now());
+    }
     audit::complete(r);
     storage::publish(&record_path(data, r.installation_id), &encode(r)?, true)?;
     // The operation and its facts are durable first. Journal IO cannot revoke an
     // accepted stop; pending facts are retried on later writes or daemon recovery.
     if audit::flush(data, r) {
         let _ = storage::publish(&record_path(data, r.installation_id), &encode(r)?, true);
+    }
+    let run = crate::failure::RunObservation {
+        instance_id: r.instance_id,
+        started_at_ms: r.created_at_ms,
+        success_at_ms: r.reached_running_at_ms,
+        finished_at_ms: r.finished_at_ms,
+        result: match r.status.state() {
+            State::Failed => Some("failed".into()),
+            State::Stopped if r.operation_done => Some(
+                if r.status.failure.is_some() {
+                    "failed"
+                } else {
+                    "stopped"
+                }
+                .into(),
+            ),
+            State::Running => Some("succeeded".into()),
+            _ => None,
+        },
+        context: r.launch_context.clone(),
+    };
+    if let Err(error) = crate::failure::observe_run(data, r.installation_id, &run) {
+        r.warnings.retain(|w| w["code"] != "HISTORY_WRITE_FAILED");
+        r.warnings.push(json!({"code":"HISTORY_WRITE_FAILED","level":"warning","title":"Run history could not be saved","evidence":{"error_code":error.code},"actions":[],"clears_when":"next successful history save"}));
+    } else {
+        r.warnings.retain(|w| w["code"] != "HISTORY_WRITE_FAILED");
     }
     Ok(())
 }
@@ -160,6 +199,8 @@ fn new_record(id: Uuid, op: Uuid, plan: &LaunchPlan, epoch: u64) -> Record {
         failure_at_ms: None,
         failure_service: None,
         reached_running_at_ms: None,
+        finished_at_ms: None,
+        launch_context: Some(plan.context()),
         services: plan
             .manifest()
             .services
@@ -1003,6 +1044,11 @@ impl Manager {
                 self.mutate(p.installation_id, Mutation::Relink(p.path), request.actor)
             }
             "status" => self.status(params::<Status>(&request.params)?.installation_id),
+            "history" => crate::failure::read_history(
+                &self.data,
+                params::<Installation>(&request.params)?.installation_id,
+            )
+            .map(|h| json!(h)),
             "stop-all" if request.params.as_object().is_some_and(|p| p.is_empty()) => {
                 self.stop_all(request.actor)
             }

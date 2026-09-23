@@ -185,6 +185,8 @@ daemon 使用一条独立的有界采集队列（64 项），最多保留 32 个
 
 写入时按每安装最多 20 条、30 天清理，读取不创建目录、不清理文件。最后失败引用与最近成功时间保存在独立 history.json 中，普通日志被清理不影响已保存的现场；迟到的补尾不能重新插入已被较新失败淘汰的记录。连续同因次数从上次成功之后的留存记录计算；达到留存边界时 count_limited_by_retention=true，调用方只能将该值显示为下界，不能声称完整历史次数。
 
+同一 history.json 保存 last_started_at_ms、last_finished_at_ms、last_result、last_run 和 last_success_context；`history <installation_id>` 与同名 RPC 只读返回这些事实，无记录时为空，不创建目录。启动准备固定分支、声明摘要、生效来源及共享 PATH 的摘要；只有真正进入 RUNNING 才更新成功基线。缺失的历史确认发起者保持 null，不推断为本次启动者。运行快照先持久化，再更新历史，失败以 HISTORY_WRITE_FAILED 提示，不阻断停止；daemon 对账可从快照补齐。旧实例的迟到观察不能替换较新的成功基线。failure 返回 changes_since_success，比较当前可读取的分支、声明和环境摘要；缺少基线或当前源码不可读时明确 unavailable，不用旧数据冒充当前事实。不存储依赖指纹或环境原值。
+
 运行状态仅 STOPPED / STARTING / RUNNING / STOPPING / FAILED；就绪、退出原因和 management_uncertain 为附加信息。操作 ID 用来关联长请求，不另建持久化任务状态机。
 
 请求采用 JSON Lines：`{version, request_id, method, params, actor?}`；响应回显 request_id，成功返回 result，错误返回沿用 M0 的 `{error:{code,message,details}}`。长操作返回 operation_id 后通过状态查询/事件获得结果；断连不取消已接受的操作。事件游标与快照绑定，过期游标要求重新读取快照。
@@ -195,6 +197,7 @@ daemon 使用一条独立的有界采集队列（64 项），最多保留 32 个
 | stop | installation_id | 可取消 STARTING；退出已证明归属的全部进程后才报告 STOPPED |
 | restart | installation_id | 先停止旧实例，成功后重新校验并分配新 instance_id |
 | status | installation_id 可选 | 返回当前状态、活动服务与提示；daemon 离线不将历史视为实时 |
+| history | installation_id | 只读长期运行事实和最近成功基线；不自动拉起 daemon |
 | logs | installation_id、instance_id、from_ms、to_ms、limit | 有界观察窗口；返回服务映射和缺口标记，慢读不阻塞 stop |
 | url | installation_id | 只读解析稳定入口，不拉起 daemon 或 App |
 | failure | installation_id、failure_id 可选 | 返回结构化失败、证据和现场完整性 |

@@ -5,13 +5,23 @@ use std::{fs, path::PathBuf};
 
 const AGE_MS: u128 = 30 * 24 * 60 * 60 * 1000;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct History {
     pub last_success_at_ms: Option<u128>,
     pub last_failure: Option<Reference>,
+    #[serde(default)]
+    pub last_started_at_ms: Option<u128>,
+    #[serde(default)]
+    pub last_finished_at_ms: Option<u128>,
+    #[serde(default)]
+    pub last_result: Option<String>,
+    #[serde(default)]
+    pub last_run: Option<RunObservation>,
+    #[serde(default)]
+    pub last_success_context: Option<LaunchContext>,
 }
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Reference {
     pub failure_id: Uuid,
@@ -66,6 +76,50 @@ fn history(dir: &Path) -> Result<History> {
         Err(e) if e.code == "NOT_FOUND" => Ok(History::default()),
         Err(e) => Err(e),
     }
+}
+
+/// The small history file remains useful after detailed evidence is expired.
+pub fn read_history(data: &Path, id: Uuid) -> Result<History> {
+    let dir = directory(data, id);
+    match fs::symlink_metadata(&dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(History::default()),
+        Err(e) => return Err(storage::io_error(&dir, e)),
+        Ok(_) => {}
+    }
+    check_directory(&data.join("failures"))?;
+    check_directory(&dir)?;
+    history(&dir)
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn observe_run(data: &Path, id: Uuid, run: &RunObservation) -> Result<()> {
+    let (dir, _lock) = writer(data, id)?;
+    let mut h = history(&dir)?;
+    let before = encode(&h)?;
+    // Reconciliation of an old instance cannot erase a newer success baseline.
+    if h.last_started_at_ms
+        .is_none_or(|at| run.started_at_ms >= at)
+    {
+        h.last_started_at_ms = Some(run.started_at_ms);
+        h.last_run = Some(run.clone());
+        if let Some(result) = &run.result {
+            h.last_result = Some(result.clone());
+        }
+    }
+    if let Some(at) = run.finished_at_ms {
+        h.last_finished_at_ms = Some(h.last_finished_at_ms.unwrap_or(0).max(at));
+    }
+    if let Some(at) = run.success_at_ms
+        && h.last_success_at_ms.is_none_or(|saved| at >= saved)
+    {
+        h.last_success_at_ms = Some(at);
+        h.last_success_context = run.context.clone();
+    }
+    let after = encode(&h)?;
+    if before != after {
+        storage::publish(&dir.join("history.json"), &after, true)?;
+    }
+    Ok(())
 }
 fn records(dir: &Path, id: Uuid) -> Result<Vec<Failure>> {
     let mut out = vec![];
@@ -177,7 +231,7 @@ pub(super) fn save(data: &Path, failure: &Failure, now: u128) -> Result<()> {
     }
     Ok(())
 }
-#[cfg(any(target_os = "macos", test))]
+#[cfg(test)]
 pub(super) fn success(data: &Path, id: Uuid, at: u128) -> Result<()> {
     let (dir, _lock) = writer(data, id)?;
     let mut h = history(&dir)?;
@@ -224,6 +278,44 @@ pub fn read(data: &Path, id: Uuid, failure_id: Option<Uuid>) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn history_keeps_new_success_context_and_reads_missing_without_writes() {
+        let t = tempfile::tempdir().unwrap();
+        let data = t.path().join("data");
+        let id = Uuid::new_v4();
+        assert!(read_history(&data, id).unwrap().last_run.is_none());
+        assert!(!data.exists());
+        let context = LaunchContext {
+            branch: Some("main".into()),
+            launch_sha256: "a".repeat(64),
+            manifest_source: "project".into(),
+            confirmed_actor: None,
+            environment_sha256: "b".repeat(64),
+        };
+        let recent = RunObservation {
+            instance_id: Uuid::new_v4(),
+            started_at_ms: 200,
+            success_at_ms: Some(220),
+            finished_at_ms: Some(250),
+            result: Some("stopped".into()),
+            context: Some(context.clone()),
+        };
+        observe_run(&data, id, &recent).unwrap();
+        let old = RunObservation {
+            instance_id: Uuid::new_v4(),
+            started_at_ms: 100,
+            success_at_ms: Some(110),
+            finished_at_ms: Some(150),
+            result: Some("failed".into()),
+            context: None,
+        };
+        observe_run(&data, id, &old).unwrap();
+        let saved = read_history(&data, id).unwrap();
+        assert_eq!(saved.last_run, Some(recent));
+        assert_eq!(saved.last_success_context, Some(context));
+        assert_eq!(saved.last_result.as_deref(), Some("stopped"));
+        assert_eq!(saved.last_finished_at_ms, Some(250));
+    }
     #[test]
     fn abandoned_tail_becomes_an_explicit_gap_and_escaped_output_stays_bounded() {
         let t = tempfile::tempdir().unwrap();

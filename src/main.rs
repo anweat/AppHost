@@ -29,6 +29,8 @@ enum Command {
     Restart { installation_id: Uuid },
     /// Read live state, or explicitly marked history while offline.
     Status { installation_id: Option<Uuid> },
+    /// Read retained run history without starting the daemon.
+    History { installation_id: Uuid },
     /// Read retained failure evidence without starting the daemon or an App.
     Failure {
         installation_id: Uuid,
@@ -271,6 +273,10 @@ fn run(cli: Cli) -> Result<Option<Value>> {
 fn run_command(cli: Cli) -> Result<Option<Value>> {
     // Read-only project commands don't need an available home or writable registry.
     let result = match cli.command {
+        Command::History { installation_id } => {
+            apphost::failure::read_history(&data_dir(cli.data_dir)?, installation_id)
+                .map(|h| json!(h))
+        }
         Command::InternalCollect { root, descriptors } => {
             #[cfg(target_os = "macos")]
             {

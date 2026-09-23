@@ -491,7 +491,6 @@ pub(super) fn run(
                 if r.status.state() == State::Running && r.reached_running_at_ms.is_none() {
                     let at = now();
                     r.reached_running_at_ms = Some(at);
-                    manager.failures.success(r.installation_id, at);
                 }
             }
             if matches!(r.status.state(), State::Running | State::Failed) {

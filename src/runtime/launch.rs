@@ -23,6 +23,12 @@ pub struct LaunchSummary<'a> {
 }
 
 impl LaunchPlan {
+    pub fn current_context(data_dir: &Path, id: Uuid) -> Result<crate::failure::LaunchContext> {
+        let installation = registry::registered(data_dir, id)?;
+        let manifest = crate::validate(&installation.path)?;
+        let baseline = environment::load(data_dir)?;
+        Ok(context(&installation.path, &manifest, &baseline))
+    }
     pub fn prepare(data_dir: &Path, installation_id: Uuid) -> Result<Self> {
         let snapshot = registry::launch_snapshot(data_dir, installation_id)?;
         let baseline = environment::load(data_dir)?;
@@ -72,6 +78,14 @@ impl LaunchPlan {
         self.snapshot.manifest()
     }
 
+    pub fn context(&self) -> crate::failure::LaunchContext {
+        context(
+            &self.snapshot.installation().path,
+            self.snapshot.manifest(),
+            &self.baseline,
+        )
+    }
+
     pub fn summary(&self) -> LaunchSummary<'_> {
         LaunchSummary {
             installation_id: self.snapshot.installation().installation_id,
@@ -80,5 +94,22 @@ impl LaunchPlan {
             launch_sha256: self.snapshot.manifest().launch_sha256(),
             services: &self.services,
         }
+    }
+}
+
+fn context(
+    root: &Path,
+    manifest: &crate::Manifest,
+    baseline: &Baseline,
+) -> crate::failure::LaunchContext {
+    use sha2::{Digest, Sha256};
+    crate::failure::LaunchContext {
+        branch: crate::git_metadata::current_branch(root, &mut 65536)
+            .ok()
+            .flatten(),
+        launch_sha256: manifest.launch_sha256(),
+        manifest_source: "project".into(),
+        confirmed_actor: None,
+        environment_sha256: format!("{:x}", Sha256::digest(baseline.path.as_bytes())),
     }
 }

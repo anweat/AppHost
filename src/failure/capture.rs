@@ -15,7 +15,6 @@ pub(crate) struct Incident {
 }
 enum Message {
     Incident(Box<Incident>),
-    Success(Uuid, u128),
 }
 pub(crate) struct Recorder {
     sender: mpsc::SyncSender<Message>,
@@ -56,11 +55,6 @@ impl Recorder {
                             .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
                     };
                     match message {
-                        Ok(Message::Success(id, at)) => {
-                            if let Err(e) = store::success(&data, id, at) {
-                                warn(&errors, id, &e);
-                            }
-                        }
                         Ok(Message::Incident(mut job)) => {
                             let id = job.failure.installation_id;
                             if job.recovered
@@ -122,9 +116,6 @@ impl Recorder {
     pub fn incident(&self, job: Incident) {
         let id = job.failure.installation_id;
         self.send(Message::Incident(Box::new(job)), id);
-    }
-    pub fn success(&self, id: Uuid, at: u128) {
-        self.send(Message::Success(id, at), id);
     }
     fn send(&self, message: Message, id: Uuid) {
         if self.sender.try_send(message).is_err() {

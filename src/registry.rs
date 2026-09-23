@@ -154,6 +154,14 @@ fn load(data_dir: &Path) -> Result<Registry> {
     load_budgeted(data_dir, &mut remaining)
 }
 
+pub fn registered(data_dir: &Path, id: Uuid) -> Result<Installation> {
+    load(data_dir)?
+        .installations
+        .into_iter()
+        .find(|i| i.installation_id == id)
+        .ok_or_else(|| Error::new("NOT_FOUND", "Installation is not registered"))
+}
+
 // Diagnostic redaction reads the confirmed snapshot without touching source trees.
 #[cfg(target_os = "macos")]
 pub(crate) fn confirmed_environment_values(data: &Path, id: Uuid) -> Result<Vec<String>> {

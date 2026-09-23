@@ -356,7 +356,7 @@ pub(super) fn serve(data_dir: &Path) -> Result<()> {
     let manager = crate::runtime::lifecycle::Manager::open(&data_dir)?;
     let hello = Arc::new(
         json!({"protocol_version":protocol::VERSION,"daemon_id":Uuid::new_v4(),
-        "pid":std::process::id(),"data_dir":*data_dir,"capabilities":["hello","check-launch","start","stop","restart","status","stop-all","logs","detach","relink","failure","journal","resume-wake"]}),
+        "pid":std::process::id(),"data_dir":*data_dir,"capabilities":["hello","check-launch","start","stop","restart","status","stop-all","logs","detach","relink","failure","journal","resume-wake","history"]}),
     );
     let clients = Arc::new(AtomicUsize::new(0));
     for stream in endpoint.listener.incoming() {

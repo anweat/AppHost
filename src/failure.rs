@@ -169,6 +169,28 @@ pub struct Failure {
     pub redaction: String,
 }
 
+/// Diagnostic facts captured when preparing the actual launch, never commands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchContext {
+    pub branch: Option<String>,
+    pub launch_sha256: String,
+    pub manifest_source: String,
+    pub confirmed_actor: Option<crate::journal::Actor>,
+    pub environment_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunObservation {
+    pub instance_id: Uuid,
+    pub started_at_ms: u128,
+    pub success_at_ms: Option<u128>,
+    pub finished_at_ms: Option<u128>,
+    pub result: Option<String>,
+    pub context: Option<LaunchContext>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Output {
@@ -204,7 +226,54 @@ impl Failure {
 }
 
 mod store;
-pub use store::read;
+#[cfg(target_os = "macos")]
+pub(crate) use store::observe_run;
+pub use store::read_history;
+pub fn read(data: &Path, id: Uuid, failure_id: Option<Uuid>) -> Result<Value> {
+    let mut value = store::read(data, id, failure_id)?;
+    let saved = value["history"]["last_success_context"].clone();
+    let comparison = match serde_json::from_value::<LaunchContext>(saved) {
+        Ok(previous) => {
+            match crate::runtime::LaunchPlan::current_context(data, id) {
+                Ok(current) => {
+                    let mut changes = Vec::new();
+                    if previous.branch.is_some()
+                        && current.branch.is_some()
+                        && previous.branch != current.branch
+                    {
+                        changes.push(json!({"field":"branch","before":previous.branch,"after":current.branch}));
+                    }
+                    for (field, old, new) in [
+                        (
+                            "launch_sha256",
+                            &previous.launch_sha256,
+                            &current.launch_sha256,
+                        ),
+                        (
+                            "manifest_source",
+                            &previous.manifest_source,
+                            &current.manifest_source,
+                        ),
+                        (
+                            "environment_sha256",
+                            &previous.environment_sha256,
+                            &current.environment_sha256,
+                        ),
+                    ] {
+                        if old != new {
+                            changes.push(json!({"field":field,"before":old,"after":new}));
+                        }
+                    }
+                    json!({"available":true,"changes":changes,"branch_known":previous.branch.is_some()&&current.branch.is_some(),"current":current})
+                }
+                Err(e) => json!({"available":false,"reason":e.code}),
+            }
+        }
+        Err(_) => json!({"available":false,"reason":"NO_SUCCESS_BASELINE"}),
+    };
+    value["changes_since_success"] = comparison;
+    Ok(value)
+}
 #[cfg(target_os = "macos")]
 pub(crate) mod capture;
 
