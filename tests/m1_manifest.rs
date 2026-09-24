@@ -36,7 +36,13 @@ fn legacy_registry(data: &Path) {
     let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     value["schema_version"] = 0.into();
     for installation in value["installations"].as_array_mut().unwrap() {
-        for key in ["revision", "confirmed_root", "confirmed_manifest"] {
+        for key in [
+            "revision",
+            "confirmed_root",
+            "confirmed_manifest",
+            "confirmed_actor",
+            "confirmed_at_ms",
+        ] {
             installation.as_object_mut().unwrap().remove(key);
         }
     }

@@ -15,6 +15,7 @@ use std::{
 };
 use uuid::Uuid;
 
+pub mod editing;
 mod launch;
 pub use launch::{LaunchSnapshot, launch_snapshot};
 
@@ -48,6 +49,10 @@ pub struct Installation {
     pub confirmed_manifest: Option<Manifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirmed_root: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmed_actor: Option<crate::journal::Actor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmed_at_ms: Option<u64>,
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -197,7 +202,9 @@ fn load_budgeted(data_dir: &Path, remaining: &mut u64) -> Result<Registry> {
                 || (registry.schema_version == 0
                     && (i.confirmed_manifest.is_some()
                         || i.confirmed_root.is_some()
-                        || i.revision != 0))
+                        || i.revision != 0
+                        || i.confirmed_actor.is_some()
+                        || i.confirmed_at_ms.is_some()))
                 || i.confirmed_launch_sha256
                     .as_ref()
                     .is_some_and(|s| s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -501,6 +508,14 @@ pub fn import(data_dir: &Path, draft: &Draft) -> Result<Vec<Installation>> {
 }
 
 pub fn import_with_receipts(data_dir: &Path, draft: &Draft) -> Result<Vec<ImportReceipt>> {
+    import_as(data_dir, draft, crate::journal::Actor::Human)
+}
+
+pub fn import_as(
+    data_dir: &Path,
+    draft: &Draft,
+    actor: crate::journal::Actor,
+) -> Result<Vec<ImportReceipt>> {
     if draft.schema_version > 1 {
         return Err(Error::new(
             "INVALID_INPUT",
@@ -591,6 +606,15 @@ pub fn import_with_receipts(data_dir: &Path, draft: &Draft) -> Result<Vec<Import
                 .iter_mut()
                 .find(|i| i.path == candidate.path)
             {
+                // An unchanged re-import is idempotent: it must not replace the
+                // original confirmer or invalidate an already prepared launch.
+                if existing.detached
+                    || !existing.confirmation_matches(&manifest)
+                    || existing.confirmed_actor.is_none()
+                {
+                    existing.confirmed_actor = Some(actor);
+                    existing.confirmed_at_ms = Some(editing::now());
+                }
                 existing.detached = false;
                 // Explicit import is confirmation for both generated and project-owned manifests.
                 existing.confirmed_launch_sha256 = Some(manifest.launch_sha256());
@@ -631,6 +655,8 @@ pub fn import_with_receipts(data_dir: &Path, draft: &Draft) -> Result<Vec<Import
                     confirmed_services: Some(manifest.services.clone()),
                     confirmed_manifest: (manifest.schema_version == 1).then(|| manifest.clone()),
                     confirmed_root: (registry.schema_version == 1).then(|| candidate.path.clone()),
+                    confirmed_actor: Some(actor),
+                    confirmed_at_ms: Some(editing::now()),
                 };
                 registry.installations.push(installation.clone());
                 installation

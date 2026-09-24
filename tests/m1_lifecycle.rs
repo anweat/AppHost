@@ -1530,3 +1530,44 @@ fn compound_start_revalidates_target_and_missing_wake_cancels_continuation() {
         f.until(owner, "STOPPED");
     }
 }
+
+#[test]
+fn manifest_save_stops_active_instance_preserves_text_and_does_not_restart() {
+    let mut f = Fixture::new();
+    let id = f.register(json!({}), None, false);
+    f.boot();
+    f.rpc("start", json!({"installation_id":id}));
+    let old = f.until(id, "RUNNING");
+    let before = apphost::registry::editing::read(&f.data, id).unwrap();
+    let text = format!(
+        "# edited in the frontend\n{}",
+        before["text"].as_str().unwrap()
+    );
+    let review = apphost::registry::editing::review(&f.data, id, Some(&text)).unwrap();
+    let accepted=f.rpc("manifest-save",json!({"installation_id":id,"edit":{"revision":review["revision"],"base_sha256":review["base_sha256"],"confirmed_launch_sha256":review["launch_sha256"],"text":text}}));
+    let stopped = f.until(id, "STOPPED");
+    assert_eq!(stopped["operation_id"], accepted["operation_id"]);
+    assert_eq!(stopped["instance_id"], old["instance_id"]);
+    assert_eq!(stopped["operation_result"]["confirmed"], true);
+    assert_eq!(
+        apphost::registry::editing::read(&f.data, id).unwrap()["text"],
+        text
+    );
+    assert!(stopped["operation_error"].is_null());
+    f.crash();
+    f.boot();
+    assert_eq!(f.state(id)["status"]["state"], "STOPPED");
+}
+
+#[test]
+fn manifest_save_rejects_stale_confirmation_before_stopping_active_service() {
+    let mut f = Fixture::new();
+    let id = f.register(json!({}), None, false);
+    f.boot();
+    f.rpc("start", json!({"installation_id":id}));
+    f.until(id, "RUNNING");
+    let review = apphost::registry::editing::review(&f.data, id, None).unwrap();
+    let error=daemon::call(&f.data,"manifest-save",json!({"installation_id":id,"edit":{"revision":review["revision"],"base_sha256":"changed","confirmed_launch_sha256":review["launch_sha256"],"text":null}}),false).unwrap_err();
+    assert_eq!(error.code, "EDIT_CONFLICT");
+    assert_eq!(f.state(id)["status"]["state"], "RUNNING");
+}

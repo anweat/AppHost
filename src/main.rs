@@ -155,6 +155,11 @@ enum Command {
         #[arg(long, required = true)]
         yes: bool,
     },
+    /// Read, review or explicitly save an installation's declaration.
+    Manifest {
+        #[command(subcommand)]
+        command: ManifestCommand,
+    },
     /// List registrations and current source/manifest diagnostics.
     List {
         #[arg(long)]
@@ -170,6 +175,33 @@ enum Command {
         installation_id: Uuid,
         label: String,
     },
+}
+
+#[derive(Subcommand)]
+enum ManifestCommand {
+    Read {
+        installation_id: Uuid,
+    },
+    Review {
+        installation_id: Uuid,
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
+    Save {
+        installation_id: Uuid,
+        #[arg(long)]
+        file: Option<PathBuf>,
+        #[arg(long)]
+        base_sha256: String,
+        #[arg(long)]
+        revision: u64,
+        #[arg(long)]
+        confirm: String,
+    },
+}
+fn manifest_buffer(path: Option<PathBuf>) -> Result<Option<String>> {
+    path.map(|p| apphost::registry::editing::read_buffer(&p))
+        .transpose()
 }
 
 #[derive(Subcommand)]
@@ -589,10 +621,45 @@ fn run_command(cli: Cli) -> Result<Option<Value>> {
             installation_id,
             policy
         )?)),
-        Command::Import { draft, yes: _ } => Ok(json!(apphost::registry::import_with_receipts(
+        Command::Import { draft, yes: _ } => Ok(json!(apphost::registry::import_as(
             &data_dir(cli.data_dir)?,
-            &apphost::read_draft(&draft)?
+            &apphost::read_draft(&draft)?,
+            apphost::journal::Actor::from_environment()?
         )?)),
+        Command::Manifest { command } => {
+            let data = data_dir(cli.data_dir)?;
+            match command {
+                ManifestCommand::Read { installation_id } => {
+                    apphost::registry::editing::read(&data, installation_id)
+                }
+                ManifestCommand::Review {
+                    installation_id,
+                    file,
+                } => {
+                    let text = manifest_buffer(file)?;
+                    apphost::registry::editing::review(&data, installation_id, text.as_deref())
+                }
+                ManifestCommand::Save {
+                    installation_id,
+                    file,
+                    base_sha256,
+                    revision,
+                    confirm,
+                } => {
+                    let text = manifest_buffer(file)?;
+                    apphost::registry::editing::save_coordinated(
+                        &data,
+                        installation_id,
+                        apphost::registry::editing::SaveRequest {
+                            text,
+                            base_sha256,
+                            revision,
+                            confirmed_launch_sha256: confirm,
+                        },
+                    )
+                }
+            }
+        }
         Command::List { all } => Ok(json!(apphost::list(&data_dir(cli.data_dir)?, all)?)),
         Command::Detach { installation_ids } => {
             let data = data_dir(cli.data_dir)?;

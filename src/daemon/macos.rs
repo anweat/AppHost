@@ -503,7 +503,7 @@ pub(super) fn serve(data_dir: &Path) -> Result<()> {
     let manager = crate::runtime::lifecycle::Manager::open(&data_dir)?;
     let hello = Arc::new(
         json!({"protocol_version":protocol::VERSION,"daemon_id":manager.events.cursor().daemon_id,
-        "pid":std::process::id(),"data_dir":*data_dir,"capabilities":["hello","check-launch","start","stop-owner-and-start","stop","restart","status","stop-all","logs","detach","relink","failure","journal","resume-wake","history","subscribe","logs-follow"]}),
+        "pid":std::process::id(),"data_dir":*data_dir,"capabilities":["hello","check-launch","start","stop-owner-and-start","stop","restart","status","stop-all","logs","detach","relink","failure","journal","resume-wake","history","subscribe","logs-follow","manifest-save"]}),
     );
     let clients = Arc::new(AtomicUsize::new(0));
     let subscriptions = Arc::new(AtomicUsize::new(0));
@@ -567,6 +567,7 @@ fn rpc(data_dir: &Path, method: &str, params: Value) -> Result<Value> {
             | "stop-owner-and-start"
             | "detach"
             | "relink"
+            | "manifest-save"
             | "stop-all"
             | "resume-wake"
     ) {
@@ -732,6 +733,7 @@ pub(super) fn call(data_dir: &Path, method: &str, params: Value, autostart: bool
                 | "stop-owner-and-start"
                 | "detach"
                 | "relink"
+                | "manifest-save"
                 | "stop-all"
                 | "resume-wake"
         ) {

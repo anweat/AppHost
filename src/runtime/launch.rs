@@ -27,7 +27,12 @@ impl LaunchPlan {
         let installation = registry::registered(data_dir, id)?;
         let manifest = crate::validate(&installation.path)?;
         let baseline = environment::load(data_dir)?;
-        Ok(context(&installation.path, &manifest, &baseline))
+        Ok(context(
+            &installation.path,
+            &manifest,
+            &baseline,
+            installation.confirmed_actor,
+        ))
     }
     pub fn prepare(data_dir: &Path, installation_id: Uuid) -> Result<Self> {
         let snapshot = registry::launch_snapshot(data_dir, installation_id)?;
@@ -87,6 +92,7 @@ impl LaunchPlan {
             &self.snapshot.installation().path,
             self.snapshot.manifest(),
             &self.baseline,
+            self.snapshot.installation().confirmed_actor,
         )
     }
 
@@ -105,6 +111,7 @@ fn context(
     root: &Path,
     manifest: &crate::Manifest,
     baseline: &Baseline,
+    confirmed_actor: Option<crate::journal::Actor>,
 ) -> crate::failure::LaunchContext {
     use sha2::{Digest, Sha256};
     crate::failure::LaunchContext {
@@ -113,7 +120,7 @@ fn context(
             .flatten(),
         launch_sha256: manifest.launch_sha256(),
         manifest_source: "project".into(),
-        confirmed_actor: None,
+        confirmed_actor,
         environment_sha256: format!("{:x}", Sha256::digest(baseline.path.as_bytes())),
     }
 }

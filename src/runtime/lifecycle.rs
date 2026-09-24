@@ -109,12 +109,14 @@ pub struct Record {
 pub enum Mutation {
     Detach,
     Relink(PathBuf),
+    SaveManifest(crate::registry::editing::SaveRequest),
 }
 impl Mutation {
-    fn apply(&self, data: &Path, id: Uuid) -> Result<Value> {
+    fn apply(&self, data: &Path, id: Uuid, actor: Actor) -> Result<Value> {
         match self {
             Self::Detach => Ok(json!(crate::registry::detach(data, id)?)),
             Self::Relink(path) => Ok(json!(crate::registry::relink(data, id, path)?)),
+            Self::SaveManifest(edit) => crate::registry::editing::save(data, id, edit, actor),
         }
     }
 }
@@ -280,7 +282,13 @@ fn load_records(data: &Path) -> Result<(Vec<Record>, Vec<Value>)> {
             || r.audit.as_ref().is_some_and(|a| {
                 !matches!(
                     a.action.as_str(),
-                    "start" | "stop" | "restart" | "stop-owner-and-start" | "detach" | "relink"
+                    "start"
+                        | "stop"
+                        | "restart"
+                        | "stop-owner-and-start"
+                        | "detach"
+                        | "relink"
+                        | "manifest-save"
                 )
             })
             || r.services.iter().enumerate().any(|(i, s)| {
@@ -780,7 +788,7 @@ impl Manager {
     pub fn mutate(self: &Arc<Self>, id: Uuid, mutation: Mutation, actor: Actor) -> Result<Value> {
         let handles = self.handles.lock().unwrap();
         if !handles.contains_key(&id) {
-            return mutation.apply(&self.data, id);
+            return mutation.apply(&self.data, id, actor);
         }
         drop(handles);
         self.request_stop(id, false, Some(mutation), actor, None)
@@ -845,6 +853,7 @@ impl Manager {
         let action = match &r.pending_mutation {
             Some(Mutation::Detach) => "detach",
             Some(Mutation::Relink(_)) => "relink",
+            Some(Mutation::SaveManifest(_)) => "manifest-save",
             None if restart => "restart",
             None => "stop",
         };
@@ -1019,6 +1028,7 @@ impl Manager {
                 | "stop-owner-and-start"
                 | "detach"
                 | "relink"
+                | "manifest-save"
                 | "stop-all"
                 | "resume-wake"
         ) {
@@ -1117,6 +1127,21 @@ impl Manager {
                 .map_err(|_| Error::new("INVALID_PARAMS", "Invalid runtime method parameters"))
         }
         match request.method.as_str() {
+            "manifest-save" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Edit {
+                    installation_id: Uuid,
+                    edit: crate::registry::editing::SaveRequest,
+                }
+                let p = params::<Edit>(&request.params)?;
+                crate::registry::editing::preflight(&self.data, p.installation_id, &p.edit)?;
+                self.mutate(
+                    p.installation_id,
+                    Mutation::SaveManifest(p.edit),
+                    request.actor,
+                )
+            }
             "stop-owner-and-start" => {
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]

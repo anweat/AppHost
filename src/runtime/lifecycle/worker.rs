@@ -285,7 +285,8 @@ pub(super) fn run(
             if stopped {
                 let mut r = h.record.lock().unwrap();
                 if let Some(mutation) = r.pending_mutation.take() {
-                    match mutation.apply(&manager.data, r.installation_id) {
+                    let actor = r.audit.as_ref().map_or(Actor::System, |a| a.actor);
+                    match mutation.apply(&manager.data, r.installation_id, actor) {
                         Ok(result) => r.operation_result = Some(result),
                         Err(error) => r.operation_error = Some(json!(error)),
                     }

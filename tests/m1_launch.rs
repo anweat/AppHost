@@ -51,7 +51,13 @@ fn legacy_and_v1_preparation_is_read_only_and_summary_omits_sensitive_values() {
             let mut legacy: serde_json::Value =
                 serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
             legacy["schema_version"] = 0.into();
-            for key in ["revision", "confirmed_root", "confirmed_manifest"] {
+            for key in [
+                "revision",
+                "confirmed_root",
+                "confirmed_manifest",
+                "confirmed_actor",
+                "confirmed_at_ms",
+            ] {
                 legacy["installations"][0]
                     .as_object_mut()
                     .unwrap()
