@@ -287,3 +287,10 @@ daemon 恢复只续接尚未派发采集器和服务的已保存目标意图，�
 `manifest save <installation_id> [--file <buffer>] --base-sha256 <hash> --revision <n> --confirm <launch_sha256>` 对应 `manifest-save`。省略文件表示确认当前外部修改，不重写文件。核心先校验项目身份、声明、确认摘要和基线；在线时由安装队列先停止实例，再在登记锁内重新检查 revision 与文件摘要，发布用户原始文本，最后保存确认。文件或登记变化返回 EDIT_CONFLICT，不覆盖编辑缓冲；文件发布后登记确认失败返回 MANIFEST_SAVED_UNCONFIRMED，并给出实际文件摘要，新的执行声明不能借旧确认启动。完成后保持停止，不自动运行。
 
 直接文本以原样字节发布，核心沿用 1 MiB 文件上限；通过 daemon 发送的整个请求沿用 64 KiB 限制，过大请求在停止或写入前拒绝。较大清单可使用外部编辑器修改后执行无文本的确认请求。确认记录新增确认 actor（human / agent / system）和时间；旧确认缺失的归属保持未知，不追填。
+
+
+## 登录自启与后台测量
+
+`login show` 只读，缺少配置时返回 enabled=false；`login enable|disable` 是显式设置，返回 activation=next_login，下一次登录生效。macOS 在用户 LaunchAgents 目录保存按规范化 data-dir 的 SHA-256 区分的 plist，ProgramArguments 仅调用当前绝对可执行路径、--data-dir 与 daemon serve；RunAtLoad=true，不声明 App 的启动命令或 KeepAlive 重启策略。设置不调用 bootstrap/bootout，不改变当前 daemon 或 App；关闭只移除本工具带来源标记的对应 plist，未知文件冲突不覆盖。首次桌面设置仍要求用户明确选择，不因程序安装或读取设置自动开启。可执行文件移动后需显式重新启用以更新路径。平台不支持时返回 UNSUPPORTED_PLATFORM。
+
+`examples/measure_idle.py` 针对独立 data-dir 和可用的显式网关端口启动 release daemon，预热 5 秒后默认采样 60 秒；合并 daemon 及所有后代进程的 RSS 和累计 CPU 时间，进程集合变化时拒绝宣称完整测量，输出系统、硬件、二进制与版本。脚本只产生 JSON，不写测试报告；网络字节未纳入该脚本，输出明确标记，不能据此判定完整资源验收通过。

@@ -38,5 +38,19 @@ fn runtime_stubs_fail_explicitly_and_never_spawn() {
             .code,
         "UNSUPPORTED_PLATFORM"
     );
+    assert_eq!(
+        apphost::login::show(temp.path()).unwrap_err().code,
+        "UNSUPPORTED_PLATFORM"
+    );
+    assert_eq!(
+        apphost::login::set(temp.path(), true).unwrap_err().code,
+        "UNSUPPORTED_PLATFORM"
+    );
+    assert_eq!(
+        apphost::daemon::watch_condition(temp.path(), serde_json::json!({}), |_| Ok(true))
+            .unwrap_err()
+            .code,
+        "UNSUPPORTED_PLATFORM"
+    );
     assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
 }

@@ -19,6 +19,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Explicitly configure daemon startup at the next login.
+    Login {
+        #[command(subcommand)]
+        command: LoginCommand,
+    },
     /// Read the stable browser entry without starting the daemon or App.
     Url { installation_id: Uuid },
     /// Read or explicitly configure the local browser gateway.
@@ -274,6 +279,13 @@ enum EnvironmentCommand {
 }
 
 #[derive(Subcommand)]
+enum LoginCommand {
+    Show,
+    Enable,
+    Disable,
+}
+
+#[derive(Subcommand)]
 enum GatewayCommand {
     Show,
     SetPort { port: u16 },
@@ -364,6 +376,14 @@ fn run(cli: Cli) -> Result<Option<Value>> {
 fn run_command(cli: Cli) -> Result<Option<Value>> {
     // Read-only project commands don't need an available home or writable registry.
     let result = match cli.command {
+        Command::Login { command } => {
+            let data = data_dir(cli.data_dir)?;
+            match command {
+                LoginCommand::Show => apphost::login::show(&data),
+                LoginCommand::Enable => apphost::login::set(&data, true),
+                LoginCommand::Disable => apphost::login::set(&data, false),
+            }
+        }
         Command::Url { installation_id } => {
             apphost::gateway::url(&data_dir(cli.data_dir)?, installation_id)
         }

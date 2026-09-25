@@ -7,6 +7,7 @@ pub mod gateway;
 mod git_metadata;
 pub mod journal;
 mod launch;
+pub mod login;
 pub mod logs;
 pub mod manifest;
 pub mod process;

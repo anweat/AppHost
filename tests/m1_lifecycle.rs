@@ -1201,11 +1201,37 @@ fn hot_reload_has_ten_second_grace_and_running_checks_do_not_connect() {
     );
     fs::write(&reload, "close listener").unwrap();
     wait(|| f.state(id)["services"][0]["ready"] == false);
+    assert!(
+        f.state(id)["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w["code"] == "PORT_READINESS_LOST")
+    );
     thread::sleep(Duration::from_millis(1200));
     assert_eq!(f.state(id)["status"]["state"], "RUNNING");
     fs::remove_file(&reload).unwrap();
     wait(|| f.state(id)["services"][0]["ready"] == true);
     assert_eq!(f.state(id)["status"]["state"], "RUNNING");
+    assert!(
+        !f.state(id)["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w["code"] == "PORT_READINESS_LOST")
+    );
+    let facts = apphost::journal::read(&f.data, None, 100).unwrap();
+    for action in ["readiness-lost", "readiness-restored"] {
+        assert_eq!(
+            facts["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|e| e["action"] == action)
+                .count(),
+            1
+        );
+    }
     // A new loss gets its own complete grace period; elapsed downtime does not accumulate.
     fs::write(&reload, "close again").unwrap();
     let lost = Instant::now();
