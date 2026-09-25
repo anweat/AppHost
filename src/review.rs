@@ -81,7 +81,8 @@ pub fn review_with_descriptions(
         if read_only {
             writeln!(
                 output,
-                "已有 apphost.toml，仅确认当前声明；如需修改，请直接编辑 apphost.toml 后重新扫描。"
+                "{}",
+                if candidate.external.is_some() { "已有外置清单，仅确认当前声明；修改请使用 manifest review/save 后重新扫描。" } else { "已有 apphost.toml，仅确认当前声明；如需修改，请直接编辑 apphost.toml 后重新扫描。" }
             )
             .map_err(|e| Error::new("IO_ERROR", e.to_string()))?;
         }
@@ -224,6 +225,9 @@ fn describe_candidate(
 }
 
 fn has_project_manifest(candidate: &crate::discovery::Candidate) -> bool {
+    if let Some(target) = &candidate.external {
+        return target.sha256.is_some();
+    }
     candidate
         .evidence
         .iter()

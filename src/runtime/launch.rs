@@ -25,13 +25,14 @@ pub struct LaunchSummary<'a> {
 impl LaunchPlan {
     pub fn current_context(data_dir: &Path, id: Uuid) -> Result<crate::failure::LaunchContext> {
         let installation = registry::registered(data_dir, id)?;
-        let manifest = crate::validate(&installation.path)?;
+        let manifest = registry::sources::resolve(data_dir, &installation)?;
         let baseline = environment::load(data_dir)?;
         Ok(context(
             &installation.path,
             &manifest,
             &baseline,
             installation.confirmed_actor,
+            installation.manifest_source,
         ))
     }
     pub fn prepare(data_dir: &Path, installation_id: Uuid) -> Result<Self> {
@@ -97,6 +98,7 @@ impl LaunchPlan {
             self.snapshot.manifest(),
             &self.baseline,
             self.snapshot.installation().confirmed_actor,
+            self.snapshot.installation().manifest_source,
         )
     }
 
@@ -116,6 +118,7 @@ fn context(
     manifest: &crate::Manifest,
     baseline: &Baseline,
     confirmed_actor: Option<crate::journal::Actor>,
+    source: registry::ManifestSource,
 ) -> crate::failure::LaunchContext {
     use sha2::{Digest, Sha256};
     crate::failure::LaunchContext {
@@ -123,7 +126,7 @@ fn context(
             .ok()
             .flatten(),
         launch_sha256: manifest.launch_sha256(),
-        manifest_source: "project".into(),
+        manifest_source: source.as_str().into(),
         confirmed_actor,
         environment_sha256: format!("{:x}", Sha256::digest(baseline.path.as_bytes())),
     }

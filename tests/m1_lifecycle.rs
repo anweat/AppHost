@@ -1571,3 +1571,42 @@ fn manifest_save_rejects_stale_confirmation_before_stopping_active_service() {
     assert_eq!(error.code, "EDIT_CONFLICT");
     assert_eq!(f.state(id)["status"]["state"], "RUNNING");
 }
+
+#[test]
+fn source_switch_stops_active_app_and_external_declaration_survives_daemon_restart() {
+    use apphost::registry::{self, ManifestSource, sources};
+    let mut f = Fixture::new();
+    let id = f.register(json!({}), None, false);
+    let root = registry::registered(&f.data, id).unwrap().path;
+    let original = fs::read(root.join("apphost.toml")).unwrap();
+    f.boot();
+    f.rpc("start", json!({"installation_id":id}));
+    f.until(id, "RUNNING");
+    let review = sources::review_switch(&f.data, id, ManifestSource::External).unwrap();
+    let request = json!({"installation_id":id,"switch":{"revision":review["revision"],"base_sha256":review["base_sha256"],"target_source":"external","target_sha256":null,"confirmed_launch_sha256":review["launch_sha256"]}});
+    let mut stale = request.clone();
+    stale["switch"]["base_sha256"] = json!("stale");
+    assert_eq!(
+        daemon::call(&f.data, "manifest-switch", stale, false)
+            .unwrap_err()
+            .code,
+        "EDIT_CONFLICT"
+    );
+    assert_eq!(f.state(id)["status"]["state"], "RUNNING");
+    f.rpc("manifest-switch", request);
+    let stopped = f.until(id, "STOPPED");
+    assert!(stopped["operation_error"].is_null(), "{stopped}");
+    assert_eq!(
+        registry::registered(&f.data, id).unwrap().manifest_source,
+        ManifestSource::External
+    );
+    assert_eq!(fs::read(root.join("apphost.toml")).unwrap(), original);
+    fs::remove_file(root.join("apphost.toml")).unwrap();
+    f.rpc("start", json!({"installation_id":id}));
+    let running = f.until(id, "RUNNING");
+    assert_eq!(running["launch_context"]["manifest_source"], "external");
+    f.crash();
+    f.boot();
+    let recovered = f.until(id, "RUNNING");
+    assert_eq!(recovered["instance_id"], running["instance_id"]);
+}

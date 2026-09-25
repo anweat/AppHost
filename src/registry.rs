@@ -16,6 +16,8 @@ use std::{
 use uuid::Uuid;
 
 pub mod editing;
+pub mod sources;
+pub use sources::ManifestSource;
 mod launch;
 pub use launch::{LaunchSnapshot, launch_snapshot};
 
@@ -29,6 +31,10 @@ pub struct Installation {
     pub revision: u64,
     pub project_id: Uuid,
     pub path: PathBuf,
+    #[serde(default, skip_serializing_if = "ManifestSource::is_project")]
+    pub manifest_source: ManifestSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_manifest_sha256: Option<String>,
     pub human_label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slug: Option<String>,
@@ -252,6 +258,8 @@ fn load_budgeted(data_dir: &Path, remaining: &mut u64) -> Result<Registry> {
                 || (registry.schema_version == 0
                     && (i.confirmed_manifest.is_some()
                         || i.confirmed_root.is_some()
+                        || i.manifest_source != ManifestSource::Project
+                        || i.external_manifest_sha256.is_some()
                         || i.revision != 0
                         || i.confirmed_actor.is_some()
                         || i.confirmed_at_ms.is_some()))
@@ -284,6 +292,9 @@ fn load_budgeted(data_dir: &Path, remaining: &mut u64) -> Result<Registry> {
                                 != Some(saved.launch_sha256().as_str())
                     })
                 }
+                || i.external_manifest_sha256
+                    .as_ref()
+                    .is_some_and(|s| s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()))
                 || i.created_manifest.as_ref().is_some_and(|m| {
                     m.sha256.len() != 64 || !m.sha256.bytes().all(|b| b.is_ascii_hexdigit())
                 })
@@ -414,7 +425,12 @@ fn lock_wait(data_dir: &Path, timeout: std::time::Duration) -> Result<RegistryLo
     Ok(RegistryLock(file))
 }
 
-fn check(candidate: &Candidate, root: &Path, registry: &Registry) -> Result<Manifest> {
+fn check(
+    data_dir: &Path,
+    candidate: &Candidate,
+    root: &Path,
+    registry: &Registry,
+) -> Result<Manifest> {
     if !candidate.path.is_absolute() {
         return Err(Error::new(
             "INVALID_INPUT",
@@ -438,6 +454,7 @@ fn check(candidate: &Candidate, root: &Path, registry: &Registry) -> Result<Mani
         .manifest
         .as_ref()
         .ok_or_else(|| Error::new("VALIDATION_ERROR", "Candidate needs a manifest"))?;
+    sources::check_target(data_dir, candidate, registry, manifest)?;
     let issues = manifest.validate(&actual);
     if !issues.is_empty() {
         return Err(
@@ -513,6 +530,10 @@ fn check(candidate: &Candidate, root: &Path, registry: &Registry) -> Result<Mani
         && candidate.evidence[0].path == FILENAME
         && candidate.evidence[0].sha256.is_some();
     if !from_manifest
+        && !candidate
+            .external
+            .as_ref()
+            .is_some_and(|e| e.sha256.is_some())
         && (inputs.len() != expected.len() || !expected.iter().all(|p| inputs.contains(p.as_str())))
     {
         return Err(Error::new(
@@ -520,7 +541,8 @@ fn check(candidate: &Candidate, root: &Path, registry: &Registry) -> Result<Mani
             "Draft is missing discovery evidence; scan again",
         ));
     }
-    if storage::fingerprint(&actual.join(FILENAME))?.is_some()
+    if candidate.external.is_none()
+        && storage::fingerprint(&actual.join(FILENAME))?.is_some()
         && Manifest::read(&actual.join(FILENAME))? != *manifest
     {
         return Err(Error::new(
@@ -566,10 +588,17 @@ pub fn import_as(
     draft: &Draft,
     actor: crate::journal::Actor,
 ) -> Result<Vec<ImportReceipt>> {
-    if draft.schema_version > 1 {
+    if draft.schema_version > 2
+        || (draft.schema_version < 2
+            && draft
+                .candidates
+                .iter()
+                .chain(draft.groups.iter().map(|g| &g.candidate))
+                .any(|c| c.external.is_some()))
+    {
         return Err(Error::new(
             "INVALID_INPUT",
-            "Only draft versions 0 and 1 are supported",
+            "External targets require draft version 2; only versions 0, 1 and 2 are supported",
         ));
     }
     if !draft.root.is_absolute() || storage::directory(&draft.root)? != draft.root {
@@ -585,7 +614,18 @@ pub fn import_as(
     let _lock = lock(data_dir)?;
     let mut registry = load(data_dir)?;
     let mut paths = HashSet::new();
+    let mut external_ids = HashSet::new();
     for candidate in &selected {
+        if candidate
+            .external
+            .as_ref()
+            .is_some_and(|e| !external_ids.insert(e.installation_id))
+        {
+            return Err(Error::new(
+                "INVALID_INPUT",
+                "Duplicate external installation ID",
+            ));
+        }
         if draft.schema_version == 0
             && candidate
                 .manifest
@@ -603,7 +643,7 @@ pub fn import_as(
                 "Duplicate selected candidate path",
             ));
         }
-        check(candidate, &draft.root, &registry)?;
+        check(data_dir, candidate, &draft.root, &registry)?;
     }
     for parent in &selected {
         if selected
@@ -622,8 +662,15 @@ pub fn import_as(
         let mut created_files = Vec::new();
         let result = (|| {
             // Recheck immediately before writing as well as before any item in the batch is written.
-            let manifest = check(candidate, &draft.root, &registry)?;
-            let path = candidate.path.join(FILENAME);
+            let manifest = check(data_dir, candidate, &draft.root, &registry)?;
+            let path = candidate
+                .external
+                .as_ref()
+                .map(|e| sources::external_path(data_dir, e.installation_id))
+                .unwrap_or_else(|| candidate.path.join(FILENAME));
+            if candidate.external.is_some() {
+                storage::private_directory(&data_dir.join("manifests"))?;
+            }
             if storage::fingerprint(&path)?.is_none() {
                 let text = manifest.to_toml()?;
                 if text.len() > storage::MAX_BYTES as usize {
@@ -674,14 +721,21 @@ pub fn import_as(
                 existing.confirmed_root =
                     (registry.schema_version == 1).then(|| existing.path.clone());
                 if let Some(file) = created_files.first() {
-                    existing.created_manifest = Some(CreatedManifest {
-                        sha256: file.sha256.clone(),
-                    });
+                    if candidate.external.is_some() {
+                        existing.external_manifest_sha256 = Some(file.sha256.clone());
+                    } else {
+                        existing.created_manifest = Some(CreatedManifest {
+                            sha256: file.sha256.clone(),
+                        });
+                    }
                 }
                 // Re-import preserves the user's existing label. label is the explicit edit operation.
                 existing.clone()
             } else {
-                let id = Uuid::new_v4();
+                let id = candidate
+                    .external
+                    .as_ref()
+                    .map_or_else(Uuid::new_v4, |e| e.installation_id);
                 let human_label =
                     unique_label(&registry, &candidate.human_label, &candidate.path, None);
                 let installation = Installation {
@@ -689,6 +743,16 @@ pub fn import_as(
                     revision: 0,
                     project_id: manifest.project_id,
                     path: candidate.path.clone(),
+                    manifest_source: if candidate.external.is_some() {
+                        ManifestSource::External
+                    } else {
+                        ManifestSource::Project
+                    },
+                    external_manifest_sha256: if candidate.external.is_some() {
+                        storage::fingerprint(&path)?
+                    } else {
+                        None
+                    },
                     slug: Some(new_slug(&human_label, id)),
                     human_label,
                     label_is_custom: candidate.human_label
@@ -699,9 +763,12 @@ pub fn import_as(
                             .to_string_lossy(),
                     detached: false,
                     retention_policy: RetentionPolicy::Active,
-                    created_manifest: created_files.first().map(|f| CreatedManifest {
-                        sha256: f.sha256.clone(),
-                    }),
+                    created_manifest: created_files
+                        .first()
+                        .filter(|_| candidate.external.is_none())
+                        .map(|f| CreatedManifest {
+                            sha256: f.sha256.clone(),
+                        }),
                     confirmed_launch_sha256: Some(manifest.launch_sha256()),
                     confirmed_services: Some(manifest.services.clone()),
                     confirmed_manifest: (manifest.schema_version == 1).then(|| manifest.clone()),
@@ -753,7 +820,7 @@ pub fn list(data_dir: &Path, include_detached: bool) -> Result<Vec<Listing>> {
                     Err(e) => return Err(storage::io_error(&installation.path, e)),
                     Ok(meta) if !meta.is_dir() => "SOURCE_MISSING",
                     Ok(_) => {
-                        match crate::validate(&installation.path) {
+                        match sources::resolve(data_dir, &installation) {
                             Ok(m) if m.project_id != installation.project_id => {
                                 manifest_error = Some(Error::new(
                                     "CONFLICT",
@@ -948,7 +1015,6 @@ pub fn detach_many(data_dir: &Path, ids: &[Uuid]) -> Result<Vec<Installation>> {
 
 pub fn relink(data_dir: &Path, id: Uuid, path: &Path) -> Result<Installation> {
     let target = storage::directory(path)?;
-    let manifest = crate::validate(&target)?;
     let _lock = lock(data_dir)?;
     let mut registry = load(data_dir)?;
     let index = registry
@@ -957,6 +1023,9 @@ pub fn relink(data_dir: &Path, id: Uuid, path: &Path) -> Result<Installation> {
         .position(|i| i.installation_id == id)
         .ok_or_else(|| Error::new("NOT_FOUND", "Unknown installation_id"))?;
     let old = &registry.installations[index];
+    let mut moved = old.clone();
+    moved.path = target.clone();
+    let manifest = sources::resolve(data_dir, &moved)?;
     if old.project_id != manifest.project_id {
         return Err(Error::new(
             "CONFLICT",
@@ -1135,15 +1204,15 @@ pub(crate) fn annotate_copies(data_dir: &Path, draft: &mut Draft, remaining: &mu
             std::collections::BTreeMap::new();
         let mut unavailable = false;
         for installation in registry.installations.iter().filter(|i| !i.detached) {
-            let bytes = match storage::read_budgeted(&installation.path.join(FILENAME), &mut budget)
-            {
-                Ok(bytes) => bytes,
-                Err(e) if e.code == "SCAN_LIMIT" => return Err(e),
-                Err(_) => {
-                    unavailable = true;
-                    continue;
-                }
-            };
+            let bytes =
+                match storage::read_budgeted(&sources::path(data_dir, installation), &mut budget) {
+                    Ok(bytes) => bytes,
+                    Err(e) if e.code == "SCAN_LIMIT" => return Err(e),
+                    Err(_) => {
+                        unavailable = true;
+                        continue;
+                    }
+                };
             let manifest = std::str::from_utf8(&bytes)
                 .ok()
                 .and_then(|s| toml::from_str::<Manifest>(s).ok());

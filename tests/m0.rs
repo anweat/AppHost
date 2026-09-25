@@ -453,7 +453,7 @@ fn duplicate_paths_missing_evidence_and_invalid_versions_are_rejected() {
     draft.candidates[0].evidence[0].path = "../../secret".into();
     assert_eq!(import(&data, &draft).unwrap_err().code, "INVALID_INPUT");
     draft = original.clone();
-    draft.schema_version = 2;
+    draft.schema_version = 3;
     assert_eq!(import(&data, &draft).unwrap_err().code, "INVALID_INPUT");
     draft = original;
     draft.root = temp.path().join("data");

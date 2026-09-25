@@ -63,9 +63,14 @@ ImportDraft v0 仅允许 v0 声明，保持原写入语义；包含 v1 清单时
 - 普通文件校验延续 `validate PATH`；外置校验显式传项目根目录，不能以清单父目录推导。
 - 活动实例上的 detach/relink/来源切换经运行协调层先停止；L0 只负责短锁、校验和持久化，不调用 daemon。
 
+登记的 `manifest_source` 缺省为 project；external 只映射到安装 UUID 对应的固定路径，不接受任意外部文件路径。`scan --external` 仅将新推断候选的目标改为外置，不改变已登记来源或已有项目清单。外置候选使用 Draft v2 的 `external: {installation_id, sha256}`，预留安装 ID 并记录已存在文件的摘要；旧 v0/v1 草稿携带外置目标时拒绝。登记失败后保留目标文件与摘要，原草稿只可复用完全一致的声明，不覆盖差异文件。重扫将外置安装视为项目边界；后来出现项目清单时取消默认选择并提示来源冲突。来源索引读取受登记表 1 MiB 限制，不消耗项目发现输入预算；外置声明仍计入扫描的文件读取预算。来源识别失败作为结构化诊断，导入时重新严格核验。
+
+`validate FILE --project-root DIR` 按显式项目根校验。`manifest read/review/save` 共用生效来源及原始文本摘要冲突检测。`manifest review-switch ID project|external` 显示原/目标路径、全文、revision、两个文件摘要与目标启动摘要；目标不存在时复制当前文本，存在时验证并复用，不覆盖。`manifest switch` 提交 revision、base_sha256、target_source、target_sha256（缺省表示目标不存在）和 confirmed_launch_sha256，经 `manifest-switch` RPC 先停止活动实例，再持登记锁重验并发布来源指针及确认。停止或复核失败不切换，不自动重启。来源切换保留两个文件；detach 回执列出项目内和外置的 AppHost 创建文件及原始摘要，均不授予自动删除权限。
+
+
 ## 已登记安装的启动准备
 
-`registry::launch_snapshot(data_dir, installation_id)` 只读取得当前项目内生效清单，验证登记未解除、源码根目录仍为登记的规范化目录、project_id 一致、声明结构有效且确认摘要匹配。缺失登记返回 NOT_FOUND，解除登记返回 DETACHED，源码不可用返回 SOURCE_MISSING，确认缺失或行为字段改变返回 REVIEW_REQUIRED。历史确认快照只用于核验，不能在清单缺失时充当启动声明。
+`registry::launch_snapshot(data_dir, installation_id)` 只读取得当前登记的唯一生效清单，验证登记未解除、源码根目录仍为登记的规范化目录、project_id 一致、声明结构有效且确认摘要匹配。缺失登记返回 NOT_FOUND，解除登记返回 DETACHED，源码不可用返回 SOURCE_MISSING，确认缺失或行为字段改变返回 REVIEW_REQUIRED。历史确认快照只用于核验，不能在清单缺失时充当启动声明。
 
 Registry v1 的 installation 带 `revision: u64`，从 1 起步；历史记录缺省为 0，读操作不补写。每次实际改变安装记录时递增，相同内容的幂等写入不递增；其他安装的修改不使当前安装失效。Registry v0 迁移时初始化旧记录的修订号，并补全可确定的历史确认根目录，保留原确认摘要。已有 v1 记录缺少 revision 时，只在该记录实际改变时初始化，不因其他安装的写入而失效。计数溢出明确报 REGISTRY_INVALID，不回绕或重置。该修订号只识别经过登记写入接口的变更，不用于对抗同用户直接篡改或恢复登记文件。
 

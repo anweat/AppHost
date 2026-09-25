@@ -26,7 +26,7 @@ pub struct SaveRequest {
     // None confirms an external edit without writing its bytes again.
     pub text: Option<String>,
 }
-fn source(installation: &Installation) -> Result<(PathBuf, String)> {
+fn source(data: &Path, installation: &Installation) -> Result<(PathBuf, String)> {
     if installation.detached {
         return Err(Error::new(
             "DETACHED",
@@ -40,7 +40,7 @@ fn source(installation: &Installation) -> Result<(PathBuf, String)> {
             "Registered project root changed",
         ));
     }
-    let path = root.join(FILENAME);
+    let path = sources::path(data, installation);
     let bytes = storage::read(&path)?;
     let text = String::from_utf8(bytes)
         .map_err(|_| Error::new("VALIDATION_ERROR", "Manifest text must be UTF-8"))?;
@@ -48,10 +48,10 @@ fn source(installation: &Installation) -> Result<(PathBuf, String)> {
 }
 pub fn read(data: &Path, id: Uuid) -> Result<Value> {
     let installation = registered(data, id)?;
-    let (path, text) = source(&installation)?;
+    let (path, text) = source(data, &installation)?;
     Ok(
         json!({"installation_id":id,"revision":installation.revision,
-        "project_root":installation.path,"manifest_source":"project","manifest_path":path,
+        "project_root":installation.path,"manifest_source":installation.manifest_source,"manifest_path":path,
         "base_sha256":digest(text.as_bytes()),"text":text}),
     )
 }
@@ -75,12 +75,12 @@ fn parse(installation: &Installation, text: &str) -> Result<Manifest> {
 }
 pub fn review(data: &Path, id: Uuid, text: Option<&str>) -> Result<Value> {
     let installation = registered(data, id)?;
-    let (path, current) = source(&installation)?;
+    let (path, current) = source(data, &installation)?;
     let proposed = text.unwrap_or(&current);
     let manifest = parse(&installation, proposed)?;
     Ok(
         json!({"installation_id":id,"revision":installation.revision,
-        "project_root":installation.path,"manifest_source":"project","manifest_path":path,
+        "project_root":installation.path,"manifest_source":installation.manifest_source,"manifest_path":path,
         "base_sha256":digest(current.as_bytes()),"before_text":current,"after_text":proposed,
         "previous_confirmation":{"manifest":installation.confirmed_manifest,"services":installation.confirmed_services,
             "launch_sha256":installation.confirmed_launch_sha256,"actor":installation.confirmed_actor,"at_ms":installation.confirmed_at_ms},
@@ -89,10 +89,11 @@ pub fn review(data: &Path, id: Uuid, text: Option<&str>) -> Result<Value> {
     )
 }
 fn checked(
+    data: &Path,
     installation: &Installation,
     request: &SaveRequest,
 ) -> Result<(PathBuf, String, Manifest)> {
-    let (path, current) = source(installation)?;
+    let (path, current) = source(data, installation)?;
     if installation.revision != request.revision
         || digest(current.as_bytes()) != request.base_sha256
     {
@@ -116,7 +117,7 @@ fn checked(
 }
 /// Reject stale or invalid input before asking a live installation to stop.
 pub fn preflight(data: &Path, id: Uuid, request: &SaveRequest) -> Result<()> {
-    checked(&registered(data, id)?, request).map(|_| ())
+    checked(data, &registered(data, id)?, request).map(|_| ())
 }
 /// L0 commit; callers coordinate active instances through the daemon first.
 pub fn save(data: &Path, id: Uuid, request: &SaveRequest, actor: Actor) -> Result<Value> {
@@ -127,7 +128,7 @@ pub fn save(data: &Path, id: Uuid, request: &SaveRequest, actor: Actor) -> Resul
         .iter()
         .position(|i| i.installation_id == id)
         .ok_or_else(|| Error::new("NOT_FOUND", "Unknown installation_id"))?;
-    let (path, text, manifest) = checked(&registry.installations[index], request)?;
+    let (path, text, manifest) = checked(data, &registry.installations[index], request)?;
     // Keep the migration backup of the original registry before publishing any
     // project bytes. A failed confirmation never recomputes the historical hash.
     upgrade(data, &mut registry)?;

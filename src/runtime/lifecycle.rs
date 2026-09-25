@@ -112,12 +112,16 @@ pub enum Mutation {
     Detach,
     Relink(PathBuf),
     SaveManifest(crate::registry::editing::SaveRequest),
+    SwitchManifest(crate::registry::sources::SwitchRequest),
 }
 impl Mutation {
     fn apply(&self, data: &Path, id: Uuid, actor: Actor) -> Result<Value> {
         match self {
             Self::Detach => Ok(json!(crate::registry::detach(data, id)?)),
             Self::Relink(path) => Ok(json!(crate::registry::relink(data, id, path)?)),
+            Self::SwitchManifest(request) => {
+                crate::registry::sources::switch(data, id, request, actor)
+            }
             Self::SaveManifest(edit) => crate::registry::editing::save(data, id, edit, actor),
         }
     }
@@ -295,6 +299,7 @@ fn load_records(data: &Path) -> Result<(Vec<Record>, Vec<Value>)> {
                         | "detach"
                         | "relink"
                         | "manifest-save"
+                        | "manifest-switch"
                         | "browser-wake"
                 )
             })
@@ -919,6 +924,7 @@ impl Manager {
             Some(Mutation::Detach) => "detach",
             Some(Mutation::Relink(_)) => "relink",
             Some(Mutation::SaveManifest(_)) => "manifest-save",
+            Some(Mutation::SwitchManifest(_)) => "manifest-switch",
             None if restart => "restart",
             None => "stop",
         };
@@ -1094,6 +1100,7 @@ impl Manager {
                 | "detach"
                 | "relink"
                 | "manifest-save"
+                | "manifest-switch"
                 | "stop-all"
                 | "resume-wake"
                 | "gateway-set-port"
@@ -1193,6 +1200,25 @@ impl Manager {
                 .map_err(|_| Error::new("INVALID_PARAMS", "Invalid runtime method parameters"))
         }
         match request.method.as_str() {
+            "manifest-switch" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Switch {
+                    installation_id: Uuid,
+                    switch: crate::registry::sources::SwitchRequest,
+                }
+                let p = params::<Switch>(&request.params)?;
+                crate::registry::sources::preflight_switch(
+                    &self.data,
+                    p.installation_id,
+                    &p.switch,
+                )?;
+                self.mutate(
+                    p.installation_id,
+                    Mutation::SwitchManifest(p.switch),
+                    request.actor,
+                )
+            }
             "manifest-save" => {
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]

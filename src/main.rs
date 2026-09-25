@@ -105,6 +105,9 @@ enum Command {
         path: PathBuf,
         #[arg(long, default_value_t = 3)]
         max_depth: usize,
+        /// Store new inferred declarations in AppHost, leaving project directories untouched.
+        #[arg(long)]
+        external: bool,
         #[arg(long, default_value_t = 10_000)]
         max_directories: usize,
         #[arg(long, default_value_t = 100_000)]
@@ -123,6 +126,8 @@ enum Command {
         path: PathBuf,
         #[arg(long)]
         check_launch: bool,
+        #[arg(long)]
+        project_root: Option<PathBuf>,
     },
     /// Confirm inferred launch declarations and optional multi-service grouping.
     Review {
@@ -186,6 +191,24 @@ enum Command {
 
 #[derive(Subcommand)]
 enum ManifestCommand {
+    ReviewSwitch {
+        installation_id: Uuid,
+        #[arg(value_enum)]
+        target: apphost::registry::ManifestSource,
+    },
+    Switch {
+        installation_id: Uuid,
+        #[arg(value_enum)]
+        target: apphost::registry::ManifestSource,
+        #[arg(long)]
+        revision: u64,
+        #[arg(long)]
+        base_sha256: String,
+        #[arg(long)]
+        target_sha256: Option<String>,
+        #[arg(long)]
+        confirm: String,
+    },
     Read {
         installation_id: Uuid,
     },
@@ -535,6 +558,7 @@ fn run_command(cli: Cli) -> Result<Option<Value>> {
         Command::Scan {
             path,
             max_depth,
+            external,
             max_directories,
             max_entries,
             max_read_bytes,
@@ -542,7 +566,7 @@ fn run_command(cli: Cli) -> Result<Option<Value>> {
             output,
         } => {
             let registry_dir = data_dir(cli.data_dir).ok();
-            let draft = apphost::discovery::scan_with_registry(
+            let mut draft = apphost::discovery::scan_with_registry(
                 &path,
                 &apphost::discovery::ScanOptions {
                     max_depth,
@@ -553,15 +577,32 @@ fn run_command(cli: Cli) -> Result<Option<Value>> {
                 },
                 registry_dir.as_deref(),
             )?;
+            if external {
+                apphost::registry::sources::select_external(
+                    registry_dir.as_deref().ok_or_else(|| {
+                        Error::new("INVALID_INPUT", "External drafts require a data directory")
+                    })?,
+                    &mut draft,
+                )?;
+            }
             if let Some(path) = output {
                 apphost::write_draft(&path, &draft)?;
             }
             Ok(json!(draft))
         }
-        Command::Validate { path, check_launch } => {
-            let manifest = apphost::validate(&path)?;
+        Command::Validate {
+            path,
+            check_launch,
+            project_root,
+        } => {
+            let manifest = match &project_root {
+                Some(root) => apphost::registry::sources::validate_at(&path, root)?,
+                None => apphost::validate(&path)?,
+            };
             if check_launch {
-                let root = if path.is_dir() {
+                let root = if let Some(root) = &project_root {
+                    root.as_path()
+                } else if path.is_dir() {
                     path.as_path()
                 } else {
                     path.parent()
@@ -652,6 +693,28 @@ fn run_command(cli: Cli) -> Result<Option<Value>> {
         Command::Manifest { command } => {
             let data = data_dir(cli.data_dir)?;
             match command {
+                ManifestCommand::ReviewSwitch {
+                    installation_id,
+                    target,
+                } => apphost::registry::sources::review_switch(&data, installation_id, target),
+                ManifestCommand::Switch {
+                    installation_id,
+                    target,
+                    revision,
+                    base_sha256,
+                    target_sha256,
+                    confirm,
+                } => apphost::registry::sources::switch_coordinated(
+                    &data,
+                    installation_id,
+                    apphost::registry::sources::SwitchRequest {
+                        revision,
+                        base_sha256,
+                        target_source: target,
+                        target_sha256,
+                        confirmed_launch_sha256: confirm,
+                    },
+                ),
                 ManifestCommand::Read { installation_id } => {
                     apphost::registry::editing::read(&data, installation_id)
                 }
@@ -716,7 +779,7 @@ fn run_command(cli: Cli) -> Result<Option<Value>> {
                 .iter()
                 .map(|i| {
                     let mut value = json!(i);
-                    value["retained_files"] = json!(i.retained_files());
+                    value["retained_files"] = json!(i.retained_files_in(&data));
                     value
                 })
                 .collect();

@@ -91,7 +91,7 @@ fn from_registry(
             "Registered project root resolves to a different directory",
         ));
     }
-    let manifest = crate::validate(&root)?;
+    let manifest = super::sources::resolve(data_dir, &installation)?;
     if manifest.project_id != installation.project_id {
         return Err(Error::new(
             "CONFLICT",

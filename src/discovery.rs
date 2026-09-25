@@ -116,6 +116,8 @@ pub struct Candidate {
     pub human_label: String,
     pub manifest: Option<Manifest>,
     pub evidence: Vec<Evidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external: Option<crate::registry::sources::ExternalTarget>,
     pub issues: Vec<Issue>,
     #[serde(default)]
     pub notes: Vec<Issue>,
@@ -257,6 +259,21 @@ fn scan_internal(
     let mut visited_paths = BTreeSet::new();
     let mut entries_seen = 0;
     let mut remaining = options.max_read_bytes;
+    // Source boundaries are bounded registration metadata, not discovery input files.
+    // A broken optional registry remains diagnostic; import still rechecks it strictly.
+    let mut registry_budget = storage::MAX_BYTES;
+    let external = match data_dir
+        .map(|data| crate::registry::sources::external_installations(data, &mut registry_budget))
+        .transpose()
+    {
+        Ok(records) => records.unwrap_or_default(),
+        Err(error) => {
+            draft
+                .issues
+                .push(Issue::new("manifest_source", error.to_string()));
+            vec![]
+        }
+    };
     while let Some((path, depth, mut owner, mut owner_depth)) = pending.pop() {
         if owner.is_some_and(|i| draft.candidates[i].hints_truncated) {
             continue;
@@ -276,6 +293,26 @@ fn scan_internal(
             continue;
         }
         visited_paths.insert(path.clone());
+        if let Some(installation) = external.iter().find(|i| i.path == path) {
+            if let Some(index) = owner {
+                let parent = &mut draft.candidates[index];
+                parent.selected = false;
+                parent
+                    .nested_projects
+                    .push(path.strip_prefix(&parent.path).unwrap().to_owned());
+                parent.notes.push(Issue::new(
+                    "group",
+                    "Registered external installation owns this nested boundary",
+                ));
+            }
+            draft.candidates.push(crate::registry::sources::candidate(
+                data_dir.unwrap(),
+                installation,
+                &mut remaining,
+            )?);
+            draft.schema_version = 2;
+            continue;
+        }
         // A conventional service directory is evidence of a possible missing service even
         // without a language marker. Only already visited direct children qualify.
         let mut found = owner.is_some_and(|i| {
@@ -406,7 +443,7 @@ fn scan_internal(
         .iter()
         .any(|c| c.manifest.as_ref().is_some_and(|m| m.schema_version == 1))
     {
-        draft.schema_version = 1;
+        draft.schema_version = draft.schema_version.max(1);
     }
     draft.candidates.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(draft)
@@ -430,6 +467,7 @@ fn candidate(
         human_label,
         manifest: None,
         evidence: vec![],
+        external: None,
         issues: vec![],
         notes: vec![],
         nested_projects: vec![],
@@ -555,6 +593,9 @@ fn candidate(
 }
 
 fn authoritative(candidate: &Candidate) -> bool {
+    if candidate.external.is_some() {
+        return true;
+    }
     candidate
         .evidence
         .iter()

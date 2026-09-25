@@ -504,7 +504,7 @@ pub(super) fn serve(data_dir: &Path) -> Result<()> {
     manager.gateway.start(&data_dir, manager.clone());
     let hello = Arc::new(
         json!({"protocol_version":protocol::VERSION,"daemon_id":manager.events.cursor().daemon_id,
-        "pid":std::process::id(),"data_dir":*data_dir,"capabilities":["hello","check-launch","start","stop-owner-and-start","stop","restart","status","stop-all","logs","detach","relink","failure","journal","resume-wake","history","subscribe","logs-follow","manifest-save","gateway-set-port"]}),
+        "pid":std::process::id(),"data_dir":*data_dir,"capabilities":["hello","check-launch","start","stop-owner-and-start","stop","restart","status","stop-all","logs","detach","relink","failure","journal","resume-wake","history","subscribe","logs-follow","manifest-save","manifest-switch","gateway-set-port"]}),
     );
     let clients = Arc::new(AtomicUsize::new(0));
     let subscriptions = Arc::new(AtomicUsize::new(0));
@@ -569,6 +569,7 @@ fn rpc(data_dir: &Path, method: &str, params: Value) -> Result<Value> {
             | "detach"
             | "relink"
             | "manifest-save"
+            | "manifest-switch"
             | "stop-all"
             | "resume-wake"
             | "gateway-set-port"
@@ -736,6 +737,7 @@ pub(super) fn call(data_dir: &Path, method: &str, params: Value, autostart: bool
                 | "detach"
                 | "relink"
                 | "manifest-save"
+                | "manifest-switch"
                 | "stop-all"
                 | "resume-wake"
         ) {
