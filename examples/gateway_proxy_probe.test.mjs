@@ -13,7 +13,7 @@ async function fixture(t, handler) {
   const {server, close} = createProbe(new Map([['probe', upstream.address().port]]));
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   t.after(async () => { await close(); upstream.closeAllConnections(); await new Promise(r => upstream.close(r)); });
-  return {port: server.address().port, upstream};
+  return {port: server.address().port, upstream, server};
 }
 function request(port, path = '/', extra = {}) {
   return new Promise((resolve, reject) => {
@@ -69,7 +69,9 @@ test('streaming chunk reaches client before upstream completes', async t => {
 });
 
 test('WebSocket upgrade preserves headers and forwards bytes in both directions', async t => {
-  const {port, upstream} = await fixture(t, (_, res) => res.end());
+  const {port, upstream, server} = await fixture(t, (_, res) => res.end());
+  const upgrades = [];
+  server.on('probe-upgrade', event => upgrades.push(event));
   upstream.on('upgrade', (req, socket, head) => {
     assert.equal(req.headers.host, `probe.localhost:${port}`);
     assert.equal(req.headers.origin, `http://probe.localhost:${port}`);
@@ -81,9 +83,10 @@ test('WebSocket upgrade preserves headers and forwards bytes in both directions'
   const client = net.connect(port, '127.0.0.1');
   t.after(() => client.destroy());
   await once(client, 'connect');
-  client.write(`GET /ws HTTP/1.1\r\nHost: probe.localhost:${port}\r\nOrigin: http://probe.localhost:${port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Protocol: fixture\r\n\r\n`);
+  client.write(`GET /ws?token=private-fixture-token HTTP/1.1\r\nHost: probe.localhost:${port}\r\nOrigin: http://probe.localhost:${port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Protocol: fixture\r\n\r\n`);
   const [response] = await once(client, 'data');
   assert.match(response.toString(), /^HTTP\/1.1 101 /);
+  assert.deepEqual(upgrades, [{host: `probe.localhost:${port}`, path: '/ws'}]);
   const echoed = once(client, 'data'); client.write(Buffer.from([0x81, 0x02, 0x6f, 0x6b]));
   assert.deepEqual((await echoed)[0], Buffer.from([0x81, 0x02, 0x6f, 0x6b]));
   client.destroy();

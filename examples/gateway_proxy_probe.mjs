@@ -80,6 +80,9 @@ export function createProbe(routes) {
       client.end(`HTTP/1.1 ${incoming.statusCode} Upgrade rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
     });
     upstream.on('upgrade', (incoming, remote, remoteHead) => {
+      // Count only completed upstream upgrades. This distinguishes a working
+      // gateway HMR connection from Vite's direct-port fallback; omit query tokens.
+      server.emit('probe-upgrade', {host: req.headers.host, path: req.url.split('?')[0]});
       sockets.add(remote);
       remote.on('close', () => { sockets.delete(remote); client.destroy(); });
       remote.on('error', () => client.destroy());
@@ -107,6 +110,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const probe = createProbe(new Map(process.argv.slice(3).map(value => {
     const [slug, upstream] = value.split('='); return [slug, Number(upstream)];
   })));
+  probe.server.on('probe-upgrade', event => console.log(JSON.stringify({upgrade: event})));
   probe.server.listen(port, '127.0.0.1', () => console.log(`PORT=${probe.server.address().port}`));
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => probe.close());
 }
