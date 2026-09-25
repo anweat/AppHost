@@ -215,7 +215,11 @@ daemon 使用一条独立的有界采集队列（64 项），最多保留 32 个
 | resume-wake | 无 | 显式解除自动唤醒暂停，不启动 App、不改变取消代数 |
 | journal | cursor、limit | 有界读取操作日志 |
 
-网关固定端口、浏览器唤醒条件和 Windows Job 生命周期按阶段稿的验证要求确定；这里不先定义兼容回退组合。平台未支持能力明确返回 UNSUPPORTED_PLATFORM。
+网关固定端口和 Windows Job 生命周期按阶段稿的验证要求确定；这里不先定义兼容回退组合。平台未支持能力明确返回 UNSUPPORTED_PLATFORM。
+
+`gateway::is_wake_navigation(method, raw_headers)` 是无副作用的导航判定，输入保留重复头部，不读取登记表或启动进程。必须满足 GET、Sec-Fetch-Dest=document、Sec-Fetch-Mode=navigate、Sec-Fetch-Site=none；Sec-Fetch-User 可缺失，出现时只能为 ?1。Sec-Purpose 或 Purpose 明确包含 prefetch / prerender 时拒绝。相关头部重复、控制字符、超长值或必需值不符均拒绝；名称不区分大小写，元数据 token 精确匹配。不通过 UA 白名单绕过缺失条件。
+
+导航判定通过仍需核对 loopback 连接、已登记 Host、安装信任与自动唤醒暂停状态。静态资源和状态轮询不能借此启动。该规则接受具有相同元数据的恢复标签页或直接导航重定向可能触发唤醒；G2 覆盖这些情形，并验证 Safari 实际书签导航，不能仅凭地址栏测试判定通过。
 
 ### 操作日志
 
