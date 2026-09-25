@@ -19,6 +19,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Read the stable browser entry without starting the daemon or App.
+    Url { installation_id: Uuid },
+    /// Read or explicitly configure the local browser gateway.
+    Gateway {
+        #[command(subcommand)]
+        command: GatewayCommand,
+    },
     #[command(hide = true)]
     InternalCollect { root: PathBuf, descriptors: String },
     /// Start a confirmed installation (starts the daemon if needed).
@@ -240,6 +247,12 @@ enum EnvironmentCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum GatewayCommand {
+    Show,
+    SetPort { port: u16 },
+}
+
 fn data_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(path) = explicit.or_else(|| env::var_os("APPHOST_DATA_DIR").map(PathBuf::from)) {
         if path.as_os_str().is_empty() {
@@ -325,6 +338,16 @@ fn run(cli: Cli) -> Result<Option<Value>> {
 fn run_command(cli: Cli) -> Result<Option<Value>> {
     // Read-only project commands don't need an available home or writable registry.
     let result = match cli.command {
+        Command::Url { installation_id } => {
+            apphost::gateway::url(&data_dir(cli.data_dir)?, installation_id)
+        }
+        Command::Gateway { command } => {
+            let data = data_dir(cli.data_dir)?;
+            match command {
+                GatewayCommand::Show => Ok(json!(apphost::gateway::config(&data)?)),
+                GatewayCommand::SetPort { port } => apphost::gateway::set_port(&data, port),
+            }
+        }
         Command::Watch {
             installation_id,
             cursor,

@@ -15,12 +15,57 @@ impl Manager {
     // The HTTP adapter must first validate loopback, Host and navigation metadata.
     // Keep this out of the management RPC method table; a browser never selects
     // arbitrary installation IDs or invokes other lifecycle operations.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn browser_wake(self: &Arc<Self>, id: Uuid) -> Result<Observation> {
         let accepted = self.start_inner(id, Actor::System, "browser-wake", None)?;
         let op = serde_json::from_value(accepted["operation_id"].clone())
             .map_err(|_| invalid("Missing browser wake operation identity"))?;
         self.browser_observe(id, op)
+    }
+
+    pub(crate) fn browser_current(&self, id: Uuid) -> Result<Option<Observation>> {
+        let op = self
+            .handles
+            .lock()
+            .unwrap()
+            .get(&id)
+            .map(|h| h.record.lock().unwrap().operation_id);
+        op.map(|op| self.browser_observe(id, op)).transpose()
+    }
+
+    pub(crate) fn browser_upstream(
+        &self,
+        id: Uuid,
+        target: &crate::manifest::OpenTarget,
+        digest: &str,
+    ) -> Result<Vec<std::net::SocketAddr>> {
+        let h = self
+            .handles
+            .lock()
+            .unwrap()
+            .get(&id)
+            .cloned()
+            .ok_or_else(expired)?;
+        let mut group = {
+            let r = h.record.lock().unwrap();
+            if r.status.state() != State::Running
+                || r.management_uncertain
+                || !r.services.iter().all(|s| s.alive && s.ready)
+                || r.launch_context
+                    .as_ref()
+                    .is_none_or(|c| c.launch_sha256 != digest)
+            {
+                return Err(Error::new(
+                    "UPSTREAM_NOT_READY",
+                    "Instance does not match a ready declaration",
+                ));
+            }
+            r.services
+                .iter()
+                .find(|s| s.name == target.service && s.port == Some(target.port))
+                .and_then(|s| s.group.clone())
+                .ok_or_else(expired)?
+        };
+        group.listener_addresses(target.port)
     }
 
     pub(crate) fn browser_observe(&self, id: Uuid, op: Uuid) -> Result<Observation> {

@@ -365,6 +365,26 @@ impl Group {
         }
         Ok(false)
     }
+
+    pub(crate) fn listener_addresses(&mut self, port: u16) -> Result<Vec<std::net::SocketAddr>> {
+        let members = self.refresh()?;
+        let mut addresses = Vec::new();
+        for (address, family) in [
+            (std::net::Ipv4Addr::LOCALHOST.into(), libc::AF_INET),
+            (std::net::Ipv6Addr::LOCALHOST.into(), libc::AF_INET6),
+        ] {
+            if owns_listener(&members, port, family)? {
+                addresses.push(std::net::SocketAddr::new(address, port));
+            }
+        }
+        if addresses.is_empty() {
+            return Err(Error::new(
+                "UPSTREAM_NOT_READY",
+                "No owned listener is available",
+            ));
+        }
+        Ok(addresses)
+    }
 }
 
 fn owns_listener(members: &[Identity], port: u16, family: i32) -> Result<bool> {

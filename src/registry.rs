@@ -30,6 +30,8 @@ pub struct Installation {
     pub project_id: Uuid,
     pub path: PathBuf,
     pub human_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
     // Legacy labels have no reliable provenance; preserve them as explicit labels.
     #[serde(default = "legacy_custom_label")]
     pub label_is_custom: bool,
@@ -92,6 +94,13 @@ pub struct RetainedFile {
 }
 
 impl Installation {
+    pub fn gateway_slug(&self) -> String {
+        // Historical records have no frozen label. Their UUID-only address is
+        // deterministic without a read-side migration and survives later edits.
+        self.slug
+            .clone()
+            .unwrap_or_else(|| new_slug("app", self.installation_id))
+    }
     fn confirmation_matches(&self, manifest: &Manifest) -> bool {
         self.confirmed_launch_sha256.as_deref() == Some(manifest.launch_sha256().as_str())
             && self
@@ -167,6 +176,44 @@ pub fn registered(data_dir: &Path, id: Uuid) -> Result<Installation> {
         .ok_or_else(|| Error::new("NOT_FOUND", "Installation is not registered"))
 }
 
+fn new_slug(label: &str, id: Uuid) -> String {
+    let mut stem = String::new();
+    for c in label.chars() {
+        if stem.len() == 30 {
+            break;
+        }
+        if c.is_ascii_alphanumeric() {
+            stem.push(c.to_ascii_lowercase());
+        } else if !stem.is_empty() && !stem.ends_with('-') {
+            stem.push('-');
+        }
+    }
+    let stem = stem.trim_matches('-');
+    format!(
+        "{}-{}",
+        if stem.is_empty() { "app" } else { stem },
+        id.simple()
+    )
+}
+
+fn valid_slug(slug: &str, id: Uuid) -> bool {
+    (34..=63).contains(&slug.len())
+        && slug
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !slug.starts_with('-')
+        && slug.ends_with(&format!("-{}", id.simple()))
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn registered_slug(data: &Path, slug: &str) -> Result<Installation> {
+    load(data)?
+        .installations
+        .into_iter()
+        .find(|i| !i.detached && i.gateway_slug() == slug)
+        .ok_or_else(|| Error::new("ROUTE_NOT_FOUND", "Host is not a registered installation"))
+}
+
 // Diagnostic redaction reads the confirmed snapshot without touching source trees.
 #[cfg(target_os = "macos")]
 pub(crate) fn confirmed_environment_values(data: &Path, id: Uuid) -> Result<Vec<String>> {
@@ -192,12 +239,15 @@ fn load_budgeted(data_dir: &Path, remaining: &mut u64) -> Result<Registry> {
         .map_err(|e| Error::new("REGISTRY_INVALID", e.to_string()))?;
     let mut ids = HashSet::new();
     let mut paths = HashSet::new();
+    let mut slugs = HashSet::new();
     if registry.schema_version > 1
         || registry.installations.iter().any(|i| {
             i.installation_id.is_nil()
                 || i.project_id.is_nil()
                 || !i.path.is_absolute()
                 || !valid_text(&i.human_label)
+                || !valid_slug(&i.gateway_slug(), i.installation_id)
+                || !slugs.insert(i.gateway_slug())
                 || i.confirmed_root.as_ref().is_some_and(|p| !p.is_absolute())
                 || (registry.schema_version == 0
                     && (i.confirmed_manifest.is_some()
@@ -639,6 +689,7 @@ pub fn import_as(
                     revision: 0,
                     project_id: manifest.project_id,
                     path: candidate.path.clone(),
+                    slug: Some(new_slug(&human_label, id)),
                     human_label,
                     label_is_custom: candidate.human_label
                         != candidate

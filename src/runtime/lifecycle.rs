@@ -26,6 +26,7 @@ use uuid::Uuid;
 
 mod audit;
 mod browser;
+pub(crate) use browser::Observation as BrowserObservation;
 mod coordination;
 mod worker;
 use worker::{Live, run};
@@ -362,6 +363,7 @@ pub(crate) struct Manager {
     stop_epoch: AtomicU64,
     failures: crate::failure::capture::Recorder,
     pub(crate) events: Arc<crate::events::Hub>,
+    pub(crate) gateway: crate::gateway::server::Controller,
 }
 impl Manager {
     fn capture_failure(&self, h: &Handle, recovered: bool) {
@@ -505,6 +507,7 @@ impl Manager {
             stop_epoch: AtomicU64::new(wake.stop_epoch),
             failures: crate::failure::capture::Recorder::open(data.to_owned(), events.clone())?,
             events: events.clone(),
+            gateway: crate::gateway::server::Controller::default(),
         });
         let mut recovered = Vec::new();
         for mut r in records {
@@ -638,7 +641,7 @@ impl Manager {
         let mut warnings = self.startup_warnings.clone();
         warnings.extend(self.failures.warnings());
         Ok(
-            json!({"live":true,"cursor":cursor,"automatic_wake_paused":self.paused.load(Ordering::Acquire),"instances":records,"warnings":warnings}),
+            json!({"live":true,"cursor":cursor,"automatic_wake_paused":self.paused.load(Ordering::Acquire),"instances":records,"warnings":warnings,"gateway":self.gateway.status()}),
         )
     }
     pub fn start(self: &Arc<Self>, id: Uuid, actor: Actor) -> Result<Value> {
@@ -1093,6 +1096,7 @@ impl Manager {
                 | "manifest-save"
                 | "stop-all"
                 | "resume-wake"
+                | "gateway-set-port"
         ) {
             // Durable installation operations record acceptance and completion in
             // save_record. Rejections, no-ops and global commands finish here.
@@ -1250,6 +1254,15 @@ impl Manager {
                 self.mutate(p.installation_id, Mutation::Relink(p.path), request.actor)
             }
             "status" => self.status(params::<Status>(&request.params)?.installation_id),
+            "gateway-set-port" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Port {
+                    port: u16,
+                }
+                let p = params::<Port>(&request.params)?;
+                self.gateway.set(&self.data, self.clone(), p.port)
+            }
             "history" => crate::failure::read_history(
                 &self.data,
                 params::<Installation>(&request.params)?.installation_id,

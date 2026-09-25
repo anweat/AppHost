@@ -18,5 +18,11 @@ fs2 = "0.4"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+hyper = { version = "1", features = ["http1", "server", "client"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+tokio = { version = "1", features = ["rt", "net", "time", "sync", "io-util", "macros"] }
+
 [dev-dependencies]
 base64 = "0.22"

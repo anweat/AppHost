@@ -215,7 +215,13 @@ daemon 使用一条独立的有界采集队列（64 项），最多保留 32 个
 | resume-wake | 无 | 显式解除自动唤醒暂停，不启动 App、不改变取消代数 |
 | journal | cursor、limit | 有界读取操作日志 |
 
-网关固定端口和 Windows Job 生命周期按阶段稿的验证要求确定；这里不先定义兼容回退组合。平台未支持能力明确返回 UNSUPPORTED_PLATFORM。
+网关默认端口为 18480，保存于当前 data-dir 的 gateway.json（schema_version=1、port）。daemon 首次成功启用网关时持久化默认值；`gateway show` 与 `url <installation_id>` 均只读，不创建文件或拉起 daemon。`gateway set-port <port>` 显式修改设置，在线时先绑定新端口再保存并切换监听；失败保留旧端口，不静默换端口。网关绑定或配置失败作为独立的 gateway 诊断出现在运行快照中，不阻断管理 socket、Stop All 和日志查询。Windows Job 生命周期仍按阶段稿的验证要求确定；未支持的平台能力明确返回 UNSUPPORTED_PLATFORM。
+
+新安装在首次登记时保存 slug：初始标签转换为至多 30 字节 ASCII 小写名称，加完整 installation_id；不能形成名称时用 app。改名、relink、重新登记不改变 slug；历史未保存 slug 的安装固定使用 app 加完整 installation_id，读取不迁移登记表。slug 后缀必须与安装身份相符，防止另一个安装复用历史地址。入口由已确认的 open_target 得出，无端口返回 url=null，多端口缺少 open 返回 OPEN_TARGET_REQUIRED。
+
+HTTP 网关独立监听 IPv4/IPv6 loopback，仅接受 HTTP/1 的 origin-form 路径、一个精确的已登记 Host（包括配置端口），拒绝 CONNECT 和客户端指定 upstream。每个请求重新检查登记与确认；只向对应 RUNNING 实例中已证明归属的声明端口转发。HTTP、上传和响应采用流式背压，WebSocket 透传双向字节；保留 Host / Origin，移除客户端 Forwarded / X-Forwarded-* 及逐跳头，再生成 X-Forwarded-Host / Proto。不开通 CORS 管理接口，不合成 /api 路由。每个网关最多 64 条连接（包含升级后连接）、128 个头部和 16 KiB 头部缓冲；请求头及 upstream 连接期限各为 5 秒，upstream 响应头期限为 120 秒。阻塞的登记、身份和生命周期工作通过有界连接对应的后台任务执行，不占住 HTTP 事件循环。
+
+保留 `/__apphost/status/<operation_id>` 为只读状态轮询路径，只接受 GET，不执行生命周期操作；静态页不缓存、禁止嵌入 iframe，脚本只允许本页 nonce，失败时提示从 AppHost 显式处理，不提供 HTTP 重试按钮。
 
 `gateway::is_wake_navigation(method, raw_headers)` 是无副作用的导航判定，输入保留重复头部，不读取登记表或启动进程。必须满足 GET、Sec-Fetch-Dest=document、Sec-Fetch-Mode=navigate、Sec-Fetch-Site=none；Sec-Fetch-User 可缺失，出现时只能为 ?1。Sec-Purpose 或 Purpose 明确包含 prefetch / prerender 时拒绝。相关头部重复、控制字符、超长值或必需值不符均拒绝；名称不区分大小写，元数据 token 精确匹配。不通过 UA 白名单绕过缺失条件。
 
