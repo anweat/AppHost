@@ -27,6 +27,7 @@ use uuid::Uuid;
 mod audit;
 mod browser;
 pub(crate) use browser::Observation as BrowserObservation;
+mod conditions;
 mod coordination;
 mod worker;
 use worker::{Live, run};
@@ -62,6 +63,8 @@ pub struct ServiceRecord {
     pub alive: bool,
     pub ready: bool,
     pub exit: Option<Value>,
+    #[serde(default)]
+    pub observed_listeners: Option<Value>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -234,6 +237,7 @@ fn declared_record(id: Uuid, op: Uuid, manifest: &crate::Manifest, epoch: u64) -
                 alive: false,
                 ready: false,
                 exit: None,
+                observed_listeners: None,
             })
             .collect(),
         collector_attempted: false,
@@ -417,7 +421,7 @@ impl Manager {
         }
         .into();
         failure.evidence = crate::failure::classify(&failure.cause_code, &failure.phase, "");
-        failure.details = json!({"operation_error":r.operation_error,"services":r.services.iter().map(|s|json!({"name":s.name,"port":s.port,"exit":s.exit,"alive":s.alive,"ready":s.ready})).collect::<Vec<_>>()});
+        failure.details = json!({"operation_error":r.operation_error,"services":r.services.iter().map(|s|json!({"name":s.name,"port":s.port,"exit":s.exit,"alive":s.alive,"ready":s.ready,"observed_listeners":s.observed_listeners})).collect::<Vec<_>>()});
         let job = crate::failure::capture::Incident {
             failure,
             services: r

@@ -168,6 +168,8 @@ data-dir 先规范化，复用私有目录规则。`daemon.lock` 使用独占 OS
 
 就绪检查仅连接声明的 loopback 端口，并通过 macOS libproc 的监听 socket 信息及当前进程身份，证明监听者属于该服务进程组。其他进程抢先监听不能满足就绪。无端口服务连续存活 2 秒后只表示进程就绪；声明的启动期限耗尽返回 READINESS_TIMEOUT。启动时每约 100 ms 检查一次；进入 RUNNING 后每约 1 秒用 libproc 被动核验监听归属，不再向服务建立探测连接。进程组消失或观察到服务退出仍判失败。运行中端口丢失时保留 RUNNING、ready=false 作为就绪告警；从首次观察丢失起按单调时间给予 10 秒宽限，恢复后清除告警和计时，连续满 10 秒后记录 PORT_NOT_READY。已经失败的实例不因端口恢复而自动恢复 RUNNING。停止意图仍以约 100 ms 的轻量检查响应，未到观察时间不刷新进程组、不枚举 FD、不序列化记录。端口预检分别试绑 IPv4/IPv6 的通配与 loopback 地址，共四处，以覆盖 macOS 允许可复用通配地址与具体地址并存的行为；保留 SO_REUSEADDR，避免把已经关闭服务的 TIME_WAIT 当作活动监听。任一地址占用即拒绝；预检不保留端口，实际启动仍须核验监听归属。占用返回 PORT_IN_USE，其他试绑错误返回 PORT_CHECK_FAILED。冲突结果包含可取得的占用 PID/名称；占用者查询最多扫描 65536 个 PID、约 250 ms，IPv4/IPv6 合并一次 FD 枚举，找到一个代表性监听者即结束。结果 scope=first_match，owners 至多一项，found 表示已取得占用证据；incomplete 仅表示未找到且本次查询受限，不承诺列全所有监听者。limitations 分别记录 permission_denied、unavailable、timed_out、pid_limit 与 pid_list_failed；界面优先展示已找到的进程，找不到且受限时才提示信息不可得，该结果不授予停止外部进程的权限。
 
+无声明端口的服务在首次就绪时采集一次已证明归属的 loopback TCP 监听端口；就绪超时也采集一次并附入失败详情。`observed_listeners` 含 ports、incomplete、scope=owned_loopback_tcp 与 observed_at_ms，仅作诊断建议，不生成 open 或 URL。单服务最多检查 128 个已核验进程、每进程至多 1024 个 FD、结果至多 128 个端口，跨进程枚举约 250 ms 后停止；权限、身份变化、容量或期限受限均标记 incomplete，不因此让 App 失败。运行时短暂失去端口产生结构化 PORT_READINESS_LOST 警告，恢复后清除，并分别记录 readiness-lost / readiness-restored 操作事实。
+
 停止各服务先发一次 SIGTERM，等待各自声明期限，再发一次 SIGKILL 并有界核验。只有进程组清空后才回收 Child；新启动但瞬时退出的组长可由 `capture_spawned(&Child)` 在尚未回收时记录身份，不能借此认领未知后代。采集器在服务停止后有 2 秒处理 EOF，仍未完成时显式结束并标记日志不完整。停止期间采集错误不能取消 STOPPING。所有已知组清空且没有未解决的 spawn 身份缺口时，才进入 STOPPED；停止失败不执行重启或后续登记变更。
 
 恢复时先拿单例锁，核验全部已有身份，再接受新启动。系统启动时间已改变的旧组视为已消失；同次启动中非空组必须有匹配的已知活成员。磁盘上的 RUNNING 不能直接恢复为 RUNNING，需要重新验证就绪；仍未就绪的进程进入有期限检查。缺失身份的 spawn 意图、身份不一致或不能完成的核验保留为 FAILED + management_uncertain，不认领、不发信号、不重复启动。没有存活进程的 FAILED 实例仍保留 FAILED 与失败原因，直到显式停止或启动改变状态，不因 daemon 或系统重启消失。已接受的停止、完整重启及停止后的登记变更，其意图随运行快照保存；恢复后仍先停止旧组，成功后才执行后半段。
@@ -263,7 +265,7 @@ CLI `journal [--cursor <event_id>] [--limit <1..200>] [--json]` 和同名 RPC �
 
 - 失败记录：code、phase、service、证据（含 rule_id 与是否推断）、输出末尾及匹配行位置；PORT_IN_USE 的占用者归属（AppHost 安装的 installation_id，或外部进程的名称与 PID）；READINESS_TIMEOUT 的已证明归属实际监听端口。
 - 连续同因次数：自上次成功以来，同一 code 与 service 的连续失败次数，由 daemon 从失败记录计算；成功后清零。
-- 条件解除：端口占用类提示按 clears_when 推送"占用已解除"的观察（受管占用者停止、外部占用者消失）。只在桌面端订阅且提示存活期间检查，频率和时长有上限；解除后只改为提供重试，不自动启动。
+- 条件解除：端口占用类提示按 clears_when 推送"占用已解除"的观察（受管占用者停止、外部占用者消失）。只在桌面端订阅且提示存活期间检查，频率和时长有上限；解除后只改为提供重试，不自动启动。 `condition-watch` RPC 指定 installation_id、failure_id、duration_secs（1–60，默认 60），共用最多 8 个观察订阅名额，每秒最多检查一次。返回 kind=condition，data.state 为 blocked / cleared / unknown / expired，complete 表示流结束。故障被替换、证据过期或后续已成功时返回 CONDITION_EXPIRED；没有确定声明端口时返回 CONDITION_UNAVAILABLE。只检查已记录的端口，不遍历端口或结束进程。`failure --watch` 使用同一订阅且不自动启动 daemon；断开、解除或期限到达便释放观察资源。
 - 自上次成功以来的变化：成功时记录分支、声明摘要及其确认来源（发起者）和运行环境基线版本（冻结稿 9.5），失败详情与当前值比较；没有记录的项不显示，不猜测。
 - 启动进度：STARTING 期间提供 started_at 与有效 startup_timeout_ms，用于显示已等待时间和期限。
 - "停止它并启动"作为一个复合操作（D10），回执区分停止占用者与启动两个阶段。

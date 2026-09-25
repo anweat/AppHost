@@ -57,6 +57,9 @@ enum Command {
     /// Read retained failure evidence without starting the daemon or an App.
     Failure {
         installation_id: Uuid,
+        /// Observe a port-conflict condition for at most 60 seconds, without retrying.
+        #[arg(long)]
+        watch: bool,
         #[arg(long)]
         failure_id: Option<Uuid>,
         #[arg(long)]
@@ -450,8 +453,33 @@ fn run_command(cli: Cli) -> Result<Option<Value>> {
         Command::Failure {
             installation_id,
             failure_id,
+            watch,
             json: _,
-        } => apphost::failure::read(&data_dir(cli.data_dir)?, installation_id, failure_id),
+        } => {
+            let data = data_dir(cli.data_dir)?;
+            let evidence = apphost::failure::read(&data, installation_id, failure_id)?;
+            if watch {
+                let id = evidence["failure"]["failure_id"].as_str().ok_or_else(|| {
+                    Error::new("CONDITION_UNAVAILABLE", "No retained failure to observe")
+                })?;
+                apphost::daemon::watch_condition(
+                    &data,
+                    json!({"installation_id":installation_id,"failure_id":id}),
+                    |event| {
+                        use std::io::Write;
+                        let mut out = std::io::stdout().lock();
+                        serde_json::to_writer(&mut out, &event)
+                            .map_err(|e| Error::new("IO_ERROR", e.to_string()))?;
+                        out.write_all(b"\n")
+                            .and_then(|_| out.flush())
+                            .map_err(|e| Error::new("IO_ERROR", e.to_string()))?;
+                        Ok(true)
+                    },
+                )?;
+                return Ok(None);
+            }
+            Ok(evidence)
+        }
         Command::StopAll => {
             apphost::daemon::call(&data_dir(cli.data_dir)?, "stop-all", json!({}), true)
         }

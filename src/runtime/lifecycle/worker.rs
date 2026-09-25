@@ -419,8 +419,56 @@ pub(super) fn run(
             } else {
                 started.elapsed() >= Duration::from_secs(2)
             };
+            let capture_listeners = {
+                let r = h.record.lock().unwrap();
+                r.services[i].observed_listeners.is_none()
+                    && ((port.is_none() && ready)
+                        || (starting
+                            && !ready
+                            && started.elapsed()
+                                >= Duration::from_millis(r.services[i].startup_timeout_ms)))
+            };
+            let listeners = capture_listeners.then(|| Group::observed_listeners(&members));
             let mut r = h.record.lock().unwrap();
+            if let Some(listeners) = listeners {
+                r.services[i].observed_listeners = Some(listeners);
+            }
             let was_running = r.status.state() == State::Running;
+            let service_name = r.services[i].name.clone();
+            let warned = r.warnings.iter().any(|w| {
+                w["code"] == "PORT_READINESS_LOST" && w["evidence"]["service"] == service_name
+            });
+            if (ready && warned)
+                || (was_running
+                    && !ready
+                    && !members.is_empty()
+                    && exit.is_none()
+                    && port.is_some()
+                    && !warned)
+            {
+                r.warnings.retain(|w| {
+                    !(w["code"] == "PORT_READINESS_LOST"
+                        && w["evidence"]["service"] == service_name)
+                });
+                if !ready {
+                    r.warnings.push(json!({"code":"PORT_READINESS_LOST","level":"warning","title":"Service listener temporarily unavailable",
+                        "evidence":{"service":service_name,"port":port,"grace_ms":10000},"actions":[],"clears_when":"owned_listener_restored"}));
+                }
+                let mut event = crate::journal::Event::new(
+                    if ready {
+                        "readiness-restored"
+                    } else {
+                        "readiness-lost"
+                    },
+                    Actor::System,
+                    crate::journal::Outcome::Observed,
+                );
+                event.installation_id = Some(r.installation_id);
+                event.instance_id = Some(r.instance_id);
+                event.operation_id = Some(r.operation_id);
+                audit::enqueue(&mut r, event);
+            }
+
             if ready {
                 *miss = None;
             } else if was_running {

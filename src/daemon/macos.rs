@@ -325,9 +325,14 @@ fn handle(
         read_frame(&mut stream, protocol::MAX_REQUEST).and_then(|bytes| protocol::decode(&bytes));
     if let Ok(request) = &request
         && request.version == protocol::VERSION
-        && matches!(request.method.as_str(), "subscribe" | "logs-follow")
+        && matches!(
+            request.method.as_str(),
+            "subscribe" | "logs-follow" | "condition-watch"
+        )
     {
-        let result = if request.method == "logs-follow" {
+        let result = if request.method == "condition-watch" {
+            watch_condition(&mut stream, manager, request, subscriptions)
+        } else if request.method == "logs-follow" {
             follow_logs(&mut stream, manager, request, subscriptions)
         } else {
             subscribe(&mut stream, manager, request, subscriptions)
@@ -359,6 +364,68 @@ fn handle(
         protocol::encode(&protocol::response(id, Err(error)), protocol::MAX_RESPONSE)
     })?;
     write_frame(&mut stream, &bytes)
+}
+
+fn watch_condition(
+    stream: &mut UnixStream,
+    manager: &Arc<crate::runtime::lifecycle::Manager>,
+    request: &protocol::Request,
+    subscriptions: &Arc<AtomicUsize>,
+) -> Result<()> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Params {
+        installation_id: Uuid,
+        failure_id: Uuid,
+        duration_secs: Option<u64>,
+    }
+    let p: Params = serde_json::from_value(request.params.clone()).map_err(|_| {
+        Error::new(
+            "INVALID_PARAMS",
+            "Invalid condition subscription parameters",
+        )
+    })?;
+    let seconds = p.duration_secs.unwrap_or(60);
+    if !(1..=60).contains(&seconds) {
+        return Err(Error::new(
+            "INVALID_PARAMS",
+            "Condition duration must be 1..60 seconds",
+        ));
+    }
+    subscriptions
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            (n < 8).then_some(n + 1)
+        })
+        .map_err(|_| {
+            Error::new(
+                "SUBSCRIPTION_LIMIT",
+                "At most eight observation subscriptions",
+            )
+        })?;
+    let _slot = Slot(subscriptions.clone());
+    let until = Instant::now() + Duration::from_secs(seconds);
+    loop {
+        let mut value = manager.port_condition(p.installation_id, p.failure_id)?;
+        if Instant::now() >= until && value["complete"] != true {
+            value["state"] = json!("expired");
+            value["complete"] = json!(true);
+        }
+        let complete = value["complete"] == true;
+        write_frame(
+            stream,
+            &protocol::encode(
+                &protocol::response(
+                    Some(&request.request_id),
+                    Ok(json!({"kind":"condition","data":value})),
+                ),
+                protocol::MAX_RESPONSE,
+            )?,
+        )?;
+        if complete {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
 }
 
 fn follow_logs(
@@ -504,7 +571,7 @@ pub(super) fn serve(data_dir: &Path) -> Result<()> {
     manager.gateway.start(&data_dir, manager.clone());
     let hello = Arc::new(
         json!({"protocol_version":protocol::VERSION,"daemon_id":manager.events.cursor().daemon_id,
-        "pid":std::process::id(),"data_dir":*data_dir,"capabilities":["hello","check-launch","start","stop-owner-and-start","stop","restart","status","stop-all","logs","detach","relink","failure","journal","resume-wake","history","subscribe","logs-follow","manifest-save","manifest-switch","gateway-set-port"]}),
+        "pid":std::process::id(),"data_dir":*data_dir,"capabilities":["hello","check-launch","start","stop-owner-and-start","stop","restart","status","stop-all","logs","detach","relink","failure","journal","resume-wake","history","subscribe","logs-follow","manifest-save","manifest-switch","gateway-set-port","condition-watch"]}),
     );
     let clients = Arc::new(AtomicUsize::new(0));
     let subscriptions = Arc::new(AtomicUsize::new(0));
@@ -652,7 +719,8 @@ pub(super) fn stream_events(
     loop {
         let bytes = read_stream_frame(&mut stream, &mut pending)?;
         let event = protocol::result(&bytes, &id)?;
-        let complete = event["kind"] == "logs" && event["data"]["complete"] == true;
+        let complete = matches!(event["kind"].as_str(), Some("logs" | "condition"))
+            && event["data"]["complete"] == true;
         if !receive(event)? || complete {
             return Ok(());
         }

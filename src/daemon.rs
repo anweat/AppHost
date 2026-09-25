@@ -98,6 +98,22 @@ pub fn watch(data: &Path, params: Value, receive: impl FnMut(Value) -> Result<bo
     }
 }
 
+pub fn watch_condition(
+    data: &Path,
+    params: Value,
+    receive: impl FnMut(Value) -> Result<bool>,
+) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::stream_events(data, "condition-watch", params, receive)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (data, params, receive);
+        Err(unsupported())
+    }
+}
+
 pub fn follow_logs(
     data: &Path,
     params: Value,

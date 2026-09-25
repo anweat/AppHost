@@ -366,6 +366,51 @@ impl Group {
         Ok(false)
     }
 
+    pub(crate) fn observed_listeners(members: &[Identity]) -> serde_json::Value {
+        unsafe extern "C" {
+            fn apphost_pid_listener_ports(
+                pid: i32,
+                ports: *mut u16,
+                capacity: i32,
+                partial: *mut i32,
+            ) -> i32;
+        }
+        let deadline = Instant::now() + Duration::from_millis(250);
+        let mut ports = std::collections::BTreeSet::new();
+        let mut incomplete = members.len() > 128;
+        for member in members.iter().take(128) {
+            if Instant::now() >= deadline {
+                incomplete = true;
+                break;
+            }
+            let mut buffer = [0u16; 128];
+            let mut partial = 0;
+            let count = unsafe {
+                apphost_pid_listener_ports(
+                    member.pid as i32,
+                    buffer.as_mut_ptr(),
+                    128,
+                    &mut partial,
+                )
+            };
+            // Discard evidence when PID/start-time identity no longer matches.
+            if count < 0
+                || !identity(member.pid).is_ok_and(|current| current.as_ref() == Some(member))
+            {
+                incomplete = true;
+                continue;
+            }
+            incomplete |= partial != 0;
+            ports.extend(buffer.into_iter().take(count as usize));
+            if ports.len() > 128 {
+                incomplete = true;
+                break;
+            }
+        }
+        serde_json::json!({"ports":ports.into_iter().take(128).collect::<Vec<_>>(),"incomplete":incomplete,
+            "scope":"owned_loopback_tcp","observed_at_ms":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()})
+    }
+
     pub(crate) fn listener_addresses(&mut self, port: u16) -> Result<Vec<std::net::SocketAddr>> {
         let members = self.refresh()?;
         let mut addresses = Vec::new();

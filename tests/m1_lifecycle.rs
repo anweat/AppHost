@@ -1610,3 +1610,133 @@ fn source_switch_stops_active_app_and_external_declaration_survives_daemon_resta
     let recovered = f.until(id, "RUNNING");
     assert_eq!(recovered["instance_id"], running["instance_id"]);
 }
+
+#[test]
+fn listener_diagnostics_report_owned_ports_without_creating_browser_entries() {
+    let mut f = Fixture::new();
+    let reserved = TcpListener::bind("127.0.0.1:0").unwrap();
+    let actual = reserved.local_addr().unwrap().port();
+    drop(reserved);
+    let unrelated = TcpListener::bind("127.0.0.1:0").unwrap();
+    let id = f.register(json!({"FIXTURE_PORT":actual.to_string()}), None, false);
+    f.boot();
+    f.rpc("start", json!({"installation_id":id}));
+    let running = f.until(id, "RUNNING");
+    let observation = &running["services"][0]["observed_listeners"];
+    assert_eq!(observation["ports"], json!([actual]));
+    assert_eq!(observation["incomplete"], false);
+    assert!(
+        !observation["ports"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(unrelated.local_addr().unwrap().port()))
+    );
+    assert!(apphost::gateway::url(&f.data, id).unwrap()["url"].is_null());
+}
+#[test]
+fn readiness_timeout_captures_actual_owned_listeners_in_failure_evidence() {
+    let mut f = Fixture::new();
+    let first = TcpListener::bind("127.0.0.1:0").unwrap();
+    let actual = first.local_addr().unwrap().port();
+    let second = TcpListener::bind("127.0.0.1:0").unwrap();
+    let declared = second.local_addr().unwrap().port();
+    drop(first);
+    drop(second);
+    let id = f.register(
+        json!({"FIXTURE_PORT":actual.to_string()}),
+        Some(declared),
+        false,
+    );
+    f.boot();
+    f.rpc("start", json!({"installation_id":id}));
+    let failed = f.until(id, "FAILED");
+    assert_eq!(failed["status"]["failure"], "READINESS_TIMEOUT");
+    assert_eq!(
+        failed["services"][0]["observed_listeners"]["ports"],
+        json!([actual])
+    );
+    wait(|| apphost::failure::read(&f.data, id, None).is_ok_and(|v| !v["failure"].is_null()));
+    let evidence = apphost::failure::read(&f.data, id, None).unwrap();
+    assert_eq!(
+        evidence["failure"]["details"]["services"][0]["observed_listeners"]["ports"],
+        json!([actual])
+    );
+}
+
+#[test]
+fn port_condition_subscription_is_bounded_and_never_retries_a_failed_start() {
+    let mut f = Fixture::new();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let id = f.register(json!({}), Some(port), false);
+    f.boot();
+    let error = daemon::call(&f.data, "start", json!({"installation_id":id}), false).unwrap_err();
+    assert_eq!(error.code, "PORT_IN_USE");
+    wait(|| apphost::failure::read(&f.data, id, None).is_ok_and(|v| !v["failure"].is_null()));
+    let failure =
+        apphost::failure::read(&f.data, id, None).unwrap()["failure"]["failure_id"].clone();
+    assert_eq!(
+        daemon::watch_condition(
+            &f.data,
+            json!({"installation_id":id,"failure_id":failure,"duration_secs":0}),
+            |_| Ok(true)
+        )
+        .unwrap_err()
+        .code,
+        "INVALID_PARAMS"
+    );
+    assert_eq!(
+        daemon::watch_condition(
+            &f.data,
+            json!({"installation_id":id,"failure_id":Uuid::new_v4()}),
+            |_| Ok(true)
+        )
+        .unwrap_err()
+        .code,
+        "CONDITION_EXPIRED"
+    );
+    let mut events = Vec::new();
+    daemon::watch_condition(
+        &f.data,
+        json!({"installation_id":id,"failure_id":failure,"duration_secs":1}),
+        |e| {
+            events.push(e);
+            Ok(true)
+        },
+    )
+    .unwrap();
+    assert_eq!(events[0]["data"]["state"], "blocked");
+    assert_eq!(events.last().unwrap()["data"]["state"], "expired");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let data = f.data.clone();
+    let fid = failure.clone();
+    let observer = thread::spawn(move || {
+        daemon::watch_condition(&data, json!({"installation_id":id,"failure_id":fid}), |e| {
+            tx.send(e).unwrap();
+            Ok(true)
+        })
+    });
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(3)).unwrap()["data"]["state"],
+        "blocked"
+    );
+    f.rpc("stop-all", json!({}));
+    drop(listener);
+    let mut event = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    if event["data"]["state"] == "blocked" {
+        event = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    }
+    assert_eq!(event["data"]["state"], "cleared");
+    assert_eq!(event["data"]["actions"], json!(["retry"]));
+    observer.join().unwrap().unwrap();
+    assert!(
+        f.rpc("status", json!({}))["instances"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        apphost::failure::read(&f.data, id, None).unwrap()["failure"]["failure_id"],
+        failure
+    );
+}
