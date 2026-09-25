@@ -87,3 +87,30 @@ fn conflicting_duplicate_and_malformed_metadata_fail_closed() {
     headers.extend(std::iter::repeat_n(("other", "v"), 126));
     assert!(!is_wake_navigation("GET", &headers));
 }
+
+#[test]
+fn header_budgets_and_optional_header_duplicates_are_enforced() {
+    let mut headers = navigation();
+    headers.extend(std::iter::repeat_n(("other", "v"), 125));
+    assert!(is_wake_navigation("GET", &headers));
+    headers.push(("other", "v"));
+    assert!(!is_wake_navigation("GET", &headers));
+    let oversized = "x".repeat(257);
+    let mut headers = navigation();
+    headers.push(("Purpose", &oversized));
+    assert!(!is_wake_navigation("GET", &headers));
+    for (name, value) in [
+        ("Sec-Fetch-User", "?1"),
+        ("Purpose", ""),
+        ("Sec-Purpose", ""),
+    ] {
+        let mut headers = navigation();
+        headers.extend([(name, value), (name, value)]);
+        assert!(!is_wake_navigation("GET", &headers));
+    }
+    for value in ["NONE", "none, none", "none\0", "none\u{7f}"] {
+        let mut headers = navigation();
+        headers[2].1 = value;
+        assert!(!is_wake_navigation("GET", &headers));
+    }
+}
