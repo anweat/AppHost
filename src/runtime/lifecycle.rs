@@ -25,6 +25,7 @@ use std::{
 use uuid::Uuid;
 
 mod audit;
+mod browser;
 mod coordination;
 mod worker;
 use worker::{Live, run};
@@ -184,6 +185,11 @@ fn save_record(data: &Path, r: &mut Record, events: &crate::events::Hub) -> Resu
     Ok(())
 }
 fn new_record(id: Uuid, op: Uuid, plan: &LaunchPlan, epoch: u64) -> Record {
+    let mut record = declared_record(id, op, plan.manifest(), epoch);
+    record.launch_context = Some(plan.context());
+    record
+}
+fn declared_record(id: Uuid, op: Uuid, manifest: &crate::Manifest, epoch: u64) -> Record {
     Record {
         schema_version: 1,
         installation_id: id,
@@ -207,9 +213,8 @@ fn new_record(id: Uuid, op: Uuid, plan: &LaunchPlan, epoch: u64) -> Record {
         failure_service: None,
         reached_running_at_ms: None,
         finished_at_ms: None,
-        launch_context: Some(plan.context()),
-        services: plan
-            .manifest()
+        launch_context: None,
+        services: manifest
             .services
             .iter()
             .enumerate()
@@ -289,6 +294,7 @@ fn load_records(data: &Path) -> Result<(Vec<Record>, Vec<Value>)> {
                         | "detach"
                         | "relink"
                         | "manifest-save"
+                        | "browser-wake"
                 )
             })
             || r.services.iter().enumerate().any(|(i, s)| {
@@ -390,9 +396,14 @@ impl Manager {
             at,
         );
         failure.failure_id = fid;
-        failure.instance_id = Some(r.instance_id);
+        let preflight = !r.collector_attempted && r.services.iter().all(|s| !s.spawn_attempted);
+        // No output existed before dispatch. Do not invent a missing log window
+        // or reserve a ten-second tail collector for a preflight rejection.
+        failure.instance_id = (!preflight).then_some(r.instance_id);
         failure.service = r.failure_service.clone();
-        failure.phase = if r.reached_running_at_ms.is_some() {
+        failure.phase = if preflight {
+            "preflight"
+        } else if r.reached_running_at_ms.is_some() {
             "runtime"
         } else {
             "startup"
@@ -670,7 +681,12 @@ impl Manager {
         owner: Option<(Uuid, Uuid)>,
     ) -> Result<Value> {
         let epoch = self.stop_epoch.load(Ordering::Acquire);
-        if let Some(h) = self.handles.lock().unwrap().get(&id) {
+        let automatic = action == "browser-wake";
+        let handles = self.handles.lock().unwrap();
+        if automatic && let Some(existing) = self.browser_existing(&handles, id, epoch)? {
+            return Ok(existing);
+        }
+        if let Some(h) = handles.get(&id) {
             let r = h.record.lock().unwrap();
             if matches!(r.status.state(), State::Starting | State::Running)
                 && h.working.load(Ordering::Acquire)
@@ -678,19 +694,30 @@ impl Manager {
                 return coordination::merge(&r, owner);
             }
         }
+        drop(handles);
         // Preparation may touch a slow source directory. It never holds the
         // manager mutex or delays another installation's Stop request.
-        let plan = LaunchPlan::prepare(&self.data, id)?;
-        if plan.manifest().services.len() > 32 {
+        let snapshot = crate::registry::launch_snapshot(&self.data, id)?;
+        let manifest = snapshot.manifest().clone();
+        if manifest.services.len() > 32 {
             return Err(Error::new(
                 "RUNTIME_LIMIT",
                 "At most 32 services per instance",
             ));
         }
+        let prepared = LaunchPlan::from_snapshot(&self.data, snapshot);
+        // Explicit operations keep their synchronous preflight errors. Browser
+        // attempts retain a failed snapshot so refresh cannot retry them forever.
+        let prepared = if automatic { prepared } else { Ok(prepared?) };
         let pending_owner = owner
-            .map(|(owner_id, instance)| coordination::prepare(self, id, owner_id, instance, &plan))
+            .map(|(owner_id, instance)| {
+                coordination::prepare(self, id, owner_id, instance, prepared.as_ref().unwrap())
+            })
             .transpose()?;
         let mut handles = self.handles.lock().unwrap();
+        if automatic && let Some(existing) = self.browser_existing(&handles, id, epoch)? {
+            return Ok(existing);
+        }
         if let Some(pending) = &pending_owner {
             let owner = handles
                 .get(&pending.installation_id)
@@ -732,39 +759,57 @@ impl Manager {
         {
             return Err(Error::new("RUNTIME_LIMIT", "Runtime capacity reached"));
         }
-        for service in &plan.manifest().services {
-            if let Some(port) = service.port {
-                let mut owned = false;
-                for h in handles.values() {
-                    let r = h.record.lock().unwrap();
-                    if pending_owner.as_ref().is_some_and(|p| {
-                        p.installation_id == r.installation_id && p.ports.contains(&port)
-                    }) {
-                        owned = true;
-                        continue;
+        let prepared = prepared.and_then(|plan| {
+            for service in &plan.manifest().services {
+                if let Some(port) = service.port {
+                    let mut owned = false;
+                    for h in handles.values() {
+                        let r = h.record.lock().unwrap();
+                        if pending_owner.as_ref().is_some_and(|p| {
+                            p.installation_id == r.installation_id && p.ports.contains(&port)
+                        }) {
+                            owned = true;
+                            continue;
+                        }
+                        if r.services.iter().any(|s| {
+                            s.port == Some(port) && (s.alive || r.status.state() == State::Starting)
+                        }) {
+                            return Err(Error::new(
+                                "PORT_IN_USE",
+                                "Port reserved by an AppHost instance",
+                            )
+                            .details(json!({"port":port,"installation_id":r.installation_id,"instance_id":r.instance_id,"service":service.name})));
+                        }
                     }
-                    if r.services.iter().any(|s| {
-                        s.port == Some(port) && (s.alive || r.status.state() == State::Starting)
-                    }) {
-                        return Err(Error::new(
-                            "PORT_IN_USE",
-                            "Port reserved by an AppHost instance",
-                        )
-                        .details(json!({"port":port,"installation_id":r.installation_id,"instance_id":r.instance_id,"service":service.name})));
+                    if !owned {
+                        port_available(port).map_err(|mut e| {
+                            e.details["service"] = json!(service.name);
+                            e
+                        })?;
                     }
-                }
-                if !owned {
-                    port_available(port).map_err(|mut e| {
-                        e.details["service"] = json!(service.name);
-                        e
-                    })?;
                 }
             }
-        }
+            Ok(plan)
+        });
+        let (plan, preflight_error) = match prepared {
+            Ok(plan) => (Some(plan), None),
+            Err(error) if automatic => (None, Some(error)),
+            Err(error) => return Err(error),
+        };
         if let Some(old) = handles.get(&id) {
             retention::archive(&self.data, &old.record.lock().unwrap())?;
         }
-        let mut record = new_record(id, Uuid::new_v4(), &plan, epoch);
+        let op = Uuid::new_v4();
+        let mut record = match &plan {
+            Some(plan) => new_record(id, op, plan, epoch),
+            None => declared_record(id, op, &manifest, epoch),
+        };
+        if let Some(error) = &preflight_error {
+            record.status.fail(&error.code);
+            record.operation_done = true;
+            record.failure_service = error.details["service"].as_str().map(str::to_owned);
+            record.operation_error = Some(json!(error));
+        }
         if let Some(old) = handles.get(&id) {
             record.journal_pending = old.record.lock().unwrap().journal_pending.clone();
         }
@@ -779,7 +824,24 @@ impl Manager {
             parked: Mutex::new(None),
         });
         handles.insert(id, h.clone());
-        self.worker(h, Some(plan), Live::empty())?;
+        if preflight_error.is_some() {
+            drop(handles);
+            self.capture_failure(&h, false);
+        } else if let Err(error) = self.worker(h.clone(), plan, Live::empty()) {
+            if !automatic {
+                return Err(error);
+            }
+            // Failure to allocate the worker is also a completed wake attempt,
+            // not permission for the next browser refresh to submit it again.
+            let mut record = h.record.lock().unwrap();
+            record.status.fail(&error.code);
+            record.operation_error = Some(json!(error));
+            record.operation_done = true;
+            save_record(&self.data, &mut record, &self.events)?;
+            drop(record);
+            drop(handles);
+            self.capture_failure(&h, false);
+        }
         Ok(result)
     }
     pub fn stop(self: &Arc<Self>, id: Uuid, restart: bool, actor: Actor) -> Result<Value> {

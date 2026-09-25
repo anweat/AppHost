@@ -221,6 +221,10 @@ daemon 使用一条独立的有界采集队列（64 项），最多保留 32 个
 
 导航判定通过仍需核对 loopback 连接、已登记 Host、安装信任与自动唤醒暂停状态。静态资源和状态轮询不能借此启动。该规则接受具有相同元数据的恢复标签页或直接导航重定向可能触发唤醒；G2 覆盖这些情形，并验证 Safari 实际书签导航，不能仅凭地址栏测试判定通过。
 
+符合条件的浏览器唤醒复用安装队列，操作事实为 browser-wake / system。同一安装已在启动或运行时合并到当前 operation_id；存在失败原因时只返回该次失败，必须由 AppHost／CLI 显式启动或完整重启才能创建新尝试。停止和 resume-wake 不清除失败阻止自动重试的语义。确认和来源检查未通过不接受启动；已通过信任检查后的环境与端口预检失败保存为没有派发进程的 FAILED 快照，保留 operation_id 和原因，daemon 重启后继续生效。不增加运行状态或另一份唤醒重试状态。
+
+唤醒准备不持全局安装锁；接受前在 Stop All 的同一短临界区复核暂停状态、取消代数和已有实例，准备期间发生 Stop All 后即使又 resume-wake，旧请求仍返回 START_CANCELLED。静态页轮询只读匹配的 installation_id / operation_id，响应仅包含状态、是否就绪、是否完成与原因码；操作已被显式操作替换则返回过期，不跟随新操作、不重新启动，也不暴露命令、路径、日志或环境。
+
 ### 操作日志
 
 操作事实保存在 `<data>/journal/<十进制段号>.jsonl`，独立于 stdout/stderr、失败现场和未来的实时事件订阅。每行版本为 1，字段为 event_id、at_ms（Unix 毫秒）、action、actor、installation_id、instance_id、operation_id、outcome、code；不适用的身份为 null。只记录身份、动作和结果码，不复制命令、环境值、路径、标签正文或原始输出。发起者随长操作保存，daemon 重启不将原来的 agent 操作改成 human。

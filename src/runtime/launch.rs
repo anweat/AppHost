@@ -36,6 +36,10 @@ impl LaunchPlan {
     }
     pub fn prepare(data_dir: &Path, installation_id: Uuid) -> Result<Self> {
         let snapshot = registry::launch_snapshot(data_dir, installation_id)?;
+        Self::from_snapshot(data_dir, snapshot)
+    }
+
+    pub(crate) fn from_snapshot(data_dir: &Path, snapshot: LaunchSnapshot) -> Result<Self> {
         let baseline = environment::load(data_dir)?;
         let services = environment::prepare(
             snapshot.manifest(),

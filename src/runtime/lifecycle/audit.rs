@@ -78,7 +78,7 @@ pub(super) fn complete(r: &mut Record) {
     let outcome = if code.as_deref() == Some("START_CANCELLED")
         || (matches!(
             operation.action.as_str(),
-            "start" | "restart" | "stop-owner-and-start"
+            "start" | "restart" | "stop-owner-and-start" | "browser-wake"
         ) && r.status.state() == State::Stopped
             && code.is_none())
     {
