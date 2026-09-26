@@ -263,7 +263,15 @@ CLI `journal [--cursor <event_id>] [--limit <1..200>] [--json]` 和同名 RPC �
 
 桌面工程放在 `desktop/`，与根目录 CLI 共用核心库和数据目录解析规则：显式目录优先，其次 APPHOST_DATA_DIR，再使用现有平台默认路径。WebView 不接受任意数据目录、任意文件读取或任意 daemon 方法名；系统操作由具名 Rust command 承接。构建锁定 npm 与 Cargo 依赖；开发服务只绑定回环地址，端口固定且被占用时报错。
 
-`desktop_snapshot()` 是只读观察接口，不创建目录或启动 daemon，返回 `{apps, live, read_at_ms, runtime_error}`。`apps` 按登记顺序排列，每项只包含 installation_id、project_id、label、path、registration_state、requires_confirmation 与可选 runtime；runtime 仅包含实例 ID、安装 ID、五态、失败代码、记录更新时间及服务 name/port/alive/ready。该列表接口不向 WebView 传递 confirmed_services、confirmed_manifest、env 或 launch_context。运行查询错误保留为 runtime_error，不把未知状态当作 STOPPED；已成功取得的历史记录保留其五态和更新时间。整个读取失败时前端保留上次成功结果、撤销 live 标识并显示读取错误。没有事件订阅的快照必须显示观察时间，不能宣称持续实时；显式刷新期间合并重复读取请求。
+桌面包通过 Tauri externalBin 携带同次构建的独立 `apphost`，运行时只从桌面可执行文件相邻位置解析，不接受 WebView 路径或 PATH 搜索结果。`desktop_connect()` 是显式的后台连接/拉起操作，使用既有单例握手和启动审计；只读 snapshot/watch 不拉起 daemon。关闭 UI 只释放观察连接，不停止 daemon、采集器或 App。Windows 仍返回明确的平台不支持结果，实际运行支持沿 G3 决策实施。
+
+`desktop_action(action, installation_id?)` 只接受 start / stop / restart / stop-all / resume-wake；返回原操作回执，界面继续跟踪对应 operation_id 的快照，不自动重发超时的写请求。`desktop_watch(channel)` 每个桌面视图使用一个只读订阅，Rust 只向 WebView 推送 connected / changed 通知，收到后合并读取快照；初始订阅自带快照游标，过期或断连要求重新取得快照。重载或显式取消通过 `desktop_unwatch()` 释放旧订阅，空闲读每 250 ms 检查取消，原有帧期限不延长。
+
+快照补充 operation_id、operation_done、脱离原始 details 的 operation_error.code/message、是否有浏览器入口及自动唤醒暂停标志。父目录只提供默认展示分组和名称，不创建后台分组。`desktop_open(installation_id, instance_id, operation_id)` 重新核验实时的同一操作/实例已 RUNNING 且服务存活就绪，随后打开核心生成的稳定 URL，不接受任意 URL。自动打开只绑定本次显式启动意图，消费一次后删除；停止、Stop All、断连或实例变更取消该意图，迟到回执不得恢复它。
+
+`desktop_preferences()` 只读 `ui.json`；外观结构 `{schema_version:1, theme:system|light|dark}`，缺省跟随系统。`desktop_theme(theme)` 原子保存主题，损坏或不支持的文件不覆盖；不保存运行状态。颜色和尺寸规则沿用原型：停止为中性底、存活进程填充项目身份色，故障色仅用于角标和提示；磁贴随画布高度计算 1–3 行、窄窗 96–120px / 常规窗 104–148px。
+
+`desktop_snapshot()` 是只读观察接口，不创建目录或启动 daemon，返回 `{apps, live, automatic_wake_paused, read_at_ms, runtime_error}`。`apps` 按登记顺序排列，每项只包含 installation_id、project_id、label、path、group、group_label、registration_state、requires_confirmation、has_entry 与可选 runtime；runtime 仅包含实例 ID、安装 ID、operation_id/operation_done/operation_error、五态、失败代码、记录更新时间及服务 name/port/alive/ready。该列表接口不向 WebView 传递 confirmed_services、confirmed_manifest、env 或 launch_context。运行查询错误保留为 runtime_error，不把未知状态当作 STOPPED；已成功取得的历史记录保留其五态和更新时间。整个读取失败时前端保留上次成功结果、撤销 live 标识并显示读取错误。没有事件订阅的快照必须显示观察时间，不能宣称持续实时；显式刷新期间合并重复读取请求。
 
 桌面反馈（冻结稿 5.9、10.4）需要接口提供以下数据，前端只做比较和展示，不自行推断或累计：
 

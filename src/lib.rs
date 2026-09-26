@@ -21,6 +21,7 @@ pub mod review;
 pub mod rules;
 pub mod runtime;
 mod storage;
+pub mod ui;
 
 use serde::Serialize;
 use serde_json::{Value, json};

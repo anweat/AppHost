@@ -59,6 +59,7 @@ jobs:
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
       - run: npm ci
+      - run: npm run prepare:backend -- --debug
       - run: npm run build
       - run: npm test
       - name: Desktop Rust format

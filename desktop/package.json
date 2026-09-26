@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "test": "vitest run",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "prepare:backend": "node tools/prepare-backend.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",

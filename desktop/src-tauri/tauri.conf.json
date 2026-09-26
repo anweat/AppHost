@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "dev.apphost.desktop",
   "build": {
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build",
+    "beforeDevCommand": "npm run prepare:backend -- --debug && npm run dev",
+    "beforeBuildCommand": "npm run prepare:backend && npm run build",
     "devUrl": "http://127.0.0.1:1420",
     "frontendDist": "../dist"
   },
@@ -25,11 +25,14 @@
     }
   },
   "bundle": {
-    "active": false,
+    "active": true,
     "icon": [
       "icons/icon.png",
       "icons/icon.icns",
       "icons/icon.ico"
+    ],
+    "externalBin": [
+      "binaries/apphost"
     ]
   }
 }

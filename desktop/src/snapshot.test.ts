@@ -29,9 +29,9 @@ describe('desktop observations', () => {
     const read = vi.fn(() => new Promise<Snapshot>(done => { resolve = done; }));
     const view = useSnapshot(read);
     const first = view.refresh();
-    await view.refresh();
+    const duplicate = view.refresh();
     expect(read).toHaveBeenCalledTimes(1);
-    resolve(snapshot); await first;
+    resolve(snapshot); await first; await duplicate;
     expect(view.loading.value).toBe(false);
   });
   it('never paints historical live services as currently alive or errors as stopped', () => {

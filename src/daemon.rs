@@ -71,6 +71,19 @@ pub fn call(data_dir: &Path, method: &str, params: Value, autostart: bool) -> Re
         Err(unsupported())
     }
 }
+/// Explicit desktop connection bootstraps the bundled CLI, not the GUI executable.
+pub fn ensure_running(data_dir: &Path, executable: &Path) -> Result<Vec<Value>> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::ensure_running(data_dir, executable)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (data_dir, executable);
+        Err(unsupported())
+    }
+}
+
 pub fn status(data_dir: &Path, installation_id: Option<Uuid>) -> Result<Value> {
     match call(
         data_dir,
@@ -95,6 +108,23 @@ pub fn watch(data: &Path, params: Value, receive: impl FnMut(Value) -> Result<bo
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (data, params, receive);
+        Err(unsupported())
+    }
+}
+
+pub fn watch_cancellable(
+    data: &Path,
+    params: Value,
+    receive: impl FnMut(Value) -> Result<bool>,
+    current: impl Fn() -> bool,
+) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::stream_events_cancellable(data, "subscribe", params, receive, current)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (data, params, receive, current);
         Err(unsupported())
     }
 }

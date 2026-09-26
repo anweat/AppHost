@@ -455,7 +455,17 @@ pub(super) fn stream_events(
     data: &Path,
     method: &str,
     params: Value,
+    receive: impl FnMut(Value) -> Result<bool>,
+) -> Result<()> {
+    stream_events_cancellable(data, method, params, receive, || true)
+}
+
+pub(super) fn stream_events_cancellable(
+    data: &Path,
+    method: &str,
+    params: Value,
     mut receive: impl FnMut(Value) -> Result<bool>,
+    current: impl Fn() -> bool,
 ) -> Result<()> {
     let data = client_root(data)?;
     let hello = handshake(&data)?;
@@ -480,7 +490,7 @@ pub(super) fn stream_events(
     )?;
     let mut pending = Vec::new();
     loop {
-        let bytes = read_stream_frame(&mut stream, &mut pending)?;
+        let bytes = read_stream_frame(&mut stream, &mut pending, &current)?;
         let event = protocol::result(&bytes, &id)?;
         let complete = matches!(event["kind"].as_str(), Some("logs" | "condition"))
             && event["data"]["complete"] == true;
@@ -491,7 +501,11 @@ pub(super) fn stream_events(
 }
 
 // Unlike a one-response RPC, a stream must retain bytes after the first newline.
-fn read_stream_frame(stream: &mut UnixStream, pending: &mut Vec<u8>) -> Result<Vec<u8>> {
+fn read_stream_frame(
+    stream: &mut UnixStream,
+    pending: &mut Vec<u8>,
+    current: &impl Fn() -> bool,
+) -> Result<Vec<u8>> {
     let mut deadline = Instant::now()
         + if pending.is_empty() {
             Duration::from_secs(35)
@@ -500,6 +514,9 @@ fn read_stream_frame(stream: &mut UnixStream, pending: &mut Vec<u8>) -> Result<V
         };
     let mut buffer = [0; 4096];
     loop {
+        if !current() {
+            return Err(Error::new("SUBSCRIPTION_CLOSED", "Observation was closed"));
+        }
         if let Some(end) = pending.iter().position(|b| *b == b'\n') {
             if end > protocol::MAX_RESPONSE {
                 return Err(Error::new(
@@ -528,7 +545,13 @@ fn read_stream_frame(stream: &mut UnixStream, pending: &mut Vec<u8>) -> Result<V
             }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                wait_io(stream, libc::POLLIN, deadline)?
+                // A desktop reload can release an idle subscription without waiting
+                // for the 30-second heartbeat. The original frame deadline stays fixed.
+                let tick = deadline.min(Instant::now() + Duration::from_millis(250));
+                match wait_io(stream, libc::POLLIN, tick) {
+                    Err(e) if e.code == "RPC_TIMEOUT" && tick < deadline => {}
+                    other => other?,
+                }
             }
             Err(e) => return Err(rpc_error(e)),
         }
@@ -556,9 +579,59 @@ pub(super) fn check_launch(data_dir: &Path, installation_id: Uuid) -> Result<Val
     )
 }
 
+// The caller supplies a trusted CLI binary, never a path received from WebView.
+pub(super) fn ensure_running(data_dir: &Path, executable: &Path) -> Result<Vec<Value>> {
+    let actor = crate::journal::Actor::from_environment()?;
+    let mut startup_warnings = Vec::new();
+    storage::private_directory(data_dir)?;
+    if let Err(error) = ping(data_dir) {
+        if error.code != "DAEMON_UNAVAILABLE" {
+            return Err(error);
+        }
+        let launch = (|| {
+            use std::os::unix::process::CommandExt;
+            let mut child = std::process::Command::new(executable)
+                .arg("--data-dir")
+                .arg(data_dir)
+                .args(["daemon", "serve"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .process_group(0)
+                .spawn()
+                .map_err(|e| storage::io_error(data_dir, e))?;
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if ping(data_dir).is_ok() {
+                    break;
+                }
+                if child
+                    .try_wait()
+                    .map_err(|e| storage::io_error(data_dir, e))?
+                    .is_some()
+                    || Instant::now() >= deadline
+                {
+                    return Err(Error::new(
+                        "DAEMON_UNAVAILABLE",
+                        "Daemon did not become ready; run daemon serve to inspect its startup error",
+                    ));
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            Ok(json!({}))
+        })();
+        let recorded =
+            crate::journal::record_result(data_dir, "daemon-start", actor, None, launch)?;
+        if let Some(warnings) = recorded["warnings"].as_array() {
+            startup_warnings.extend(warnings.iter().cloned());
+        }
+    }
+    Ok(startup_warnings)
+}
+
 pub(super) fn call(data_dir: &Path, method: &str, params: Value, autostart: bool) -> Result<Value> {
     // Reject bad attribution before a mutating call can create storage or a daemon.
-    let actor = if autostart
+    let _actor = if autostart
         || matches!(
             method,
             "start"
@@ -576,54 +649,14 @@ pub(super) fn call(data_dir: &Path, method: &str, params: Value, autostart: bool
     } else {
         crate::journal::Actor::Human
     };
-    let mut startup_warnings = Vec::new();
-    if autostart {
-        storage::private_directory(data_dir)?;
-        if let Err(error) = ping(data_dir) {
-            if error.code != "DAEMON_UNAVAILABLE" {
-                return Err(error);
-            }
-            let launch = (|| {
-                use std::os::unix::process::CommandExt;
-                let mut child = std::process::Command::new(
-                    std::env::current_exe().map_err(|e| storage::io_error(data_dir, e))?,
-                )
-                .arg("--data-dir")
-                .arg(data_dir)
-                .args(["daemon", "serve"])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .process_group(0)
-                .spawn()
-                .map_err(|e| storage::io_error(data_dir, e))?;
-                let deadline = Instant::now() + Duration::from_secs(5);
-                loop {
-                    if ping(data_dir).is_ok() {
-                        break;
-                    }
-                    if child
-                        .try_wait()
-                        .map_err(|e| storage::io_error(data_dir, e))?
-                        .is_some()
-                        || Instant::now() >= deadline
-                    {
-                        return Err(Error::new(
-                            "DAEMON_UNAVAILABLE",
-                            "Daemon did not become ready; run daemon serve to inspect its startup error",
-                        ));
-                    }
-                    thread::sleep(Duration::from_millis(20));
-                }
-                Ok(json!({}))
-            })();
-            let recorded =
-                crate::journal::record_result(data_dir, "daemon-start", actor, None, launch)?;
-            if let Some(warnings) = recorded["warnings"].as_array() {
-                startup_warnings.extend(warnings.iter().cloned());
-            }
-        }
-    }
+    let startup_warnings = if autostart {
+        ensure_running(
+            data_dir,
+            &std::env::current_exe().map_err(|e| storage::io_error(data_dir, e))?,
+        )?
+    } else {
+        Vec::new()
+    };
     let data_dir = client_root(data_dir)?;
     let hello = handshake(&data_dir)?;
     if !hello["capabilities"]
@@ -681,5 +714,22 @@ mod tests {
             "RPC_TIMEOUT"
         );
         assert!(start.elapsed() < Duration::from_secs(4));
+    }
+}
+
+#[cfg(test)]
+mod desktop_subscription_tests {
+    use super::*;
+    #[test]
+    fn cancelled_idle_subscription_does_not_wait_for_heartbeat() {
+        let (mut reader, _writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        let began = Instant::now();
+        let error = read_stream_frame(&mut reader, &mut Vec::new(), &|| {
+            began.elapsed() < Duration::from_millis(30)
+        })
+        .unwrap_err();
+        assert_eq!(error.code, "SUBSCRIPTION_CLOSED");
+        assert!(began.elapsed() < Duration::from_secs(2));
     }
 }

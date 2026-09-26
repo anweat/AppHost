@@ -2,15 +2,16 @@ export type State = 'STOPPED' | 'STARTING' | 'RUNNING' | 'STOPPING' | 'FAILED';
 export interface CoreError { code: string; message: string }
 export interface Instance {
   installation_id: string; instance_id: string; updated_at_ms: number;
+  operation_id?: string; operation_done?: boolean; operation_error?: CoreError | null;
   status: { state: State; failure: string | null };
   services: { name: string; port: number | null; alive: boolean; ready: boolean }[];
 }
 export interface AppEntry {
-  installation_id: string; project_id: string; label: string; path: string;
-  registration_state: string; requires_confirmation: boolean; runtime: Instance | null;
+  installation_id: string; project_id: string; label: string; path: string; group?: string; group_label?: string;
+  registration_state: string; requires_confirmation: boolean; has_entry?: boolean; runtime: Instance | null;
 }
 export interface Snapshot {
-  apps: AppEntry[]; live: boolean; read_at_ms: number; runtime_error: CoreError | null;
+  apps: AppEntry[]; live: boolean; automatic_wake_paused?: boolean; read_at_ms: number; runtime_error: CoreError | null;
 }
 const labels: Record<State, string> = {
   STOPPED: '已停止', STARTING: '正在启动', RUNNING: '运行中', STOPPING: '正在停止', FAILED: '运行失败',

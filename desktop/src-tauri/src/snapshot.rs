@@ -12,8 +12,11 @@ pub struct App {
     project_id: Uuid,
     label: String,
     path: String,
+    group: String,
+    group_label: String,
     registration_state: String,
     requires_confirmation: bool,
+    has_entry: bool,
     runtime: Option<Instance>,
 }
 
@@ -23,9 +26,20 @@ pub struct App {
 pub struct Instance {
     installation_id: Uuid,
     instance_id: Uuid,
+    #[serde(default)]
+    operation_id: Option<Uuid>,
+    #[serde(default)]
+    operation_done: bool,
+    #[serde(default)]
+    operation_error: Option<Failure>,
     status: Status,
     updated_at_ms: u64,
     services: Vec<Service>,
+}
+#[derive(Deserialize, Serialize)]
+struct Failure {
+    code: String,
+    message: String,
 }
 #[derive(Deserialize, Serialize)]
 struct Status {
@@ -42,12 +56,15 @@ struct Service {
 #[derive(Deserialize)]
 struct Observation {
     live: bool,
+    #[serde(default)]
+    automatic_wake_paused: bool,
     instances: Vec<Instance>,
 }
 #[derive(Serialize)]
 pub struct Snapshot {
     pub apps: Vec<App>,
     pub live: bool,
+    pub automatic_wake_paused: bool,
     pub read_at_ms: u64,
     pub runtime_error: Option<Error>,
 }
@@ -72,6 +89,9 @@ pub fn read(data: &Path) -> Result<Snapshot> {
         },
         None => (None, runtime_error),
     };
+    let automatic_wake_paused = observation
+        .as_ref()
+        .is_some_and(|o| o.automatic_wake_paused);
     let live = observation.as_ref().is_some_and(|o| o.live);
     let mut instances: std::collections::HashMap<_, _> = observation
         .into_iter()
@@ -84,15 +104,35 @@ pub fn read(data: &Path) -> Result<Snapshot> {
             installation_id: item.installation.installation_id,
             project_id: item.installation.project_id,
             label: item.display_label,
+            group: item
+                .installation
+                .path
+                .parent()
+                .unwrap_or(Path::new(""))
+                .to_string_lossy()
+                .into_owned(),
+            group_label: item
+                .installation
+                .path
+                .parent()
+                .and_then(Path::file_name)
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "应用".into()),
             path: item.installation.path.to_string_lossy().into_owned(),
             registration_state: item.registration_state.into(),
             requires_confirmation: item.requires_launch_confirmation,
+            has_entry: item
+                .manifest
+                .as_ref()
+                .and_then(|m| m.open_target().ok().flatten())
+                .is_some(),
             runtime: instances.remove(&item.installation.installation_id),
         })
         .collect();
     Ok(Snapshot {
         apps,
         live,
+        automatic_wake_paused,
         runtime_error,
         read_at_ms: SystemTime::now()
             .duration_since(UNIX_EPOCH)

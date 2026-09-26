@@ -1,21 +1,26 @@
 import { computed, ref } from 'vue';
 import { errorMessage, type CoreError, type Snapshot } from './model';
-
 export function useSnapshot(read: () => Promise<Snapshot>) {
-  const snapshot = ref<Snapshot | null>(null);
-  const error = ref<CoreError | null>(null);
-  const loading = ref(false);
-  // A failed refresh keeps the last observation, but withdraws live authority.
+  const snapshot = ref<Snapshot | null>(null), error = ref<CoreError | null>(null), loading = ref(false);
+  let dirty = false, disconnected = false, flight: Promise<void> | null = null;
   const displayed = computed(() => snapshot.value && ({
-    ...snapshot.value, live: snapshot.value.live && !error.value,
+    ...snapshot.value, live: snapshot.value.live && !error.value && !disconnected,
     runtime_error: error.value ?? snapshot.value.runtime_error,
   }));
-  async function refresh() {
-    if (loading.value) return;
+  function refresh(): Promise<void> {
+    if (flight) return flight;
     loading.value = true;
-    try { snapshot.value = await read(); error.value = null; }
-    catch (cause) { error.value = errorMessage(cause); }
-    finally { loading.value = false; }
+    flight = (async () => {
+      do {
+        dirty = false;
+        try { snapshot.value = await read(); error.value = null; }
+        catch (cause) { error.value = errorMessage(cause); }
+      } while (dirty);
+    })().finally(() => { loading.value = false; flight = null; });
+    return flight;
   }
-  return { displayed, error, loading, refresh };
+  function invalidate() { dirty = true; return refresh(); }
+  function connected() { disconnected = false; void invalidate(); }
+  function offline(cause: unknown) { disconnected = true; error.value = errorMessage(cause); }
+  return { displayed, error, loading, refresh, invalidate, connected, offline };
 }
