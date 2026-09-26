@@ -35,6 +35,7 @@ impl Controller {
     pub(crate) fn status(&self) -> Value {
         self.diagnostic.lock().unwrap().clone()
     }
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn start(&self, data: &Path, manager: Arc<Manager>) {
         let result = config_lock(data)
             .and_then(|_lock| config(data).and_then(|c| self.set_locked(data, manager, c.port)));

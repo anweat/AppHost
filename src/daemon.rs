@@ -7,6 +7,7 @@ use uuid::Uuid;
 #[cfg(target_os = "macos")]
 mod macos;
 pub mod protocol;
+pub mod session;
 
 pub fn serve(data_dir: &Path) -> Result<()> {
     #[cfg(target_os = "macos")]

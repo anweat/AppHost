@@ -211,7 +211,6 @@ fn valid_slug(slug: &str, id: Uuid) -> bool {
         && slug.ends_with(&format!("-{}", id.simple()))
 }
 
-#[cfg(target_os = "macos")]
 pub(crate) fn registered_slug(data: &Path, slug: &str) -> Result<Installation> {
     load(data)?
         .installations
@@ -221,7 +220,6 @@ pub(crate) fn registered_slug(data: &Path, slug: &str) -> Result<Installation> {
 }
 
 // Diagnostic redaction reads the confirmed snapshot without touching source trees.
-#[cfg(target_os = "macos")]
 pub(crate) fn confirmed_environment_values(data: &Path, id: Uuid) -> Result<Vec<String>> {
     Ok(load(data)?
         .installations
@@ -843,7 +841,7 @@ pub fn list(data_dir: &Path, include_detached: bool) -> Result<Vec<Listing>> {
             let requires_launch_confirmation = manifest.as_ref().is_none_or(|m| !installation.confirmation_matches(m));
             if requires_launch_confirmation {
                 launch_warnings.push(crate::manifest::Issue::new("launch_confirmation", match launch_changed {
-                    Some(true) => "Launch declaration changed after confirmation; review and import again before launch",
+                    Some(true) => "Launch declaration changed after confirmation; use manifest review and manifest save before launch",
                     _ => "No matching confirmed launch declaration is available; explicit confirmation is required",
                 }));
             }

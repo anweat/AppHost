@@ -43,17 +43,52 @@ const RULES: &[(&str, &str, &[&str])] = &[
     ),
 ];
 
+// Restrict shell diagnostics to common project-local executables. An arbitrary
+// missing executable is not evidence that installing project dependencies helps.
+fn missing_project_tool(line: &str) -> bool {
+    let line = line.to_ascii_lowercase();
+    let tool = [": command not found", ": not found"]
+        .iter()
+        .find_map(|marker| {
+            line.split_once(marker)
+                .and_then(|(prefix, _)| prefix.split_whitespace().last())
+        });
+    tool.is_some_and(|tool| {
+        [
+            "vite",
+            "next",
+            "tsx",
+            "nuxt",
+            "webpack",
+            "astro",
+            "vue-cli-service",
+        ]
+        .contains(&tool)
+    })
+}
+fn vite_port_conflict(line: &str) -> bool {
+    let line = line.to_ascii_lowercase();
+    line.split("port ").skip(1).any(|suffix| {
+        suffix
+            .split_once(" is already in use")
+            .is_some_and(|(port, _)| port.parse::<u16>().is_ok_and(|port| port != 0))
+    })
+}
+
 pub fn classify(cause: &str, phase: &str, stderr: &str) -> Evidence {
     if matches!(
         cause,
         "SERVICE_EXITED" | "READINESS_TIMEOUT" | "SPAWN_FAILED"
     ) {
         for (code, rule, patterns) in RULES {
-            if let Some((line, text)) = stderr
-                .lines()
-                .enumerate()
-                .find(|(_, line)| patterns.iter().any(|pattern| line.contains(pattern)))
-            {
+            if let Some((line, text)) = stderr.lines().enumerate().find(|(_, line)| {
+                patterns.iter().any(|pattern| {
+                    line.to_ascii_lowercase()
+                        .contains(&pattern.to_ascii_lowercase())
+                        || (*code == "PORT_IN_USE" && vite_port_conflict(line))
+                        || (*code == "DEPENDENCY_MISSING" && missing_project_tool(line))
+                })
+            }) {
                 return Evidence {
                     code: (*code).into(),
                     rule_id: (*rule).into(),
@@ -135,7 +170,6 @@ pub fn redact(text: &str, secrets: &[String]) -> String {
 fn invalid(message: &str) -> Error {
     Error::new("FAILURE_INVALID", message)
 }
-#[cfg(any(target_os = "macos", test))]
 fn encode(value: &impl Serialize) -> Result<Vec<u8>> {
     let bytes = serde_json::to_vec(value).map_err(|e| invalid(&e.to_string()))?;
     // Leave room for the RPC envelope rather than filling its complete 1 MiB budget.
@@ -225,8 +259,11 @@ impl Failure {
     }
 }
 
+mod advice;
 mod store;
-#[cfg(target_os = "macos")]
+pub use advice::advice;
+mod export;
+pub use export::export;
 pub(crate) use store::observe_run;
 pub use store::read_history;
 pub fn read(data: &Path, id: Uuid, failure_id: Option<Uuid>) -> Result<Value> {
@@ -272,9 +309,15 @@ pub fn read(data: &Path, id: Uuid, failure_id: Option<Uuid>) -> Result<Value> {
         Err(_) => json!({"available":false,"reason":"NO_SUCCESS_BASELINE"}),
     };
     value["changes_since_success"] = comparison;
+    if let Ok(failure) = serde_json::from_value::<Failure>(value["failure"].clone()) {
+        value["advice"] = advice::enrich(
+            data,
+            &failure,
+            value["consecutive_same_cause"].as_u64().unwrap_or(1),
+        );
+    }
     Ok(value)
 }
-#[cfg(target_os = "macos")]
 pub(crate) mod capture;
 
 #[cfg(test)]
@@ -299,6 +342,37 @@ mod tests {
         assert_eq!(
             classify("READINESS_TIMEOUT", "startup", "v22.0.0").code,
             "READINESS_TIMEOUT"
+        );
+    }
+    #[test]
+    fn common_diagnostics_are_case_insensitive_and_keep_structured_failures() {
+        for message in [
+            "address already in use",
+            "Port 5173 is already in use",
+            "Eaddrinuse",
+        ] {
+            assert_eq!(
+                classify("SERVICE_EXITED", "startup", message).code,
+                "PORT_IN_USE"
+            );
+        }
+        for message in ["sh: vite: command not found", "sh: 1: next: not found"] {
+            assert_eq!(
+                classify("SERVICE_EXITED", "startup", message).code,
+                "DEPENDENCY_MISSING"
+            );
+        }
+        assert_eq!(
+            classify("SERVICE_EXITED", "startup", "sh: invite: command not found").code,
+            "EARLY_EXIT"
+        );
+        assert_eq!(
+            classify("SERVICE_EXITED", "startup", "sh: custom-tool: not found").code,
+            "EARLY_EXIT"
+        );
+        assert_eq!(
+            classify("INVALID_COMMAND", "preflight", "ModuleNotFoundError:").code,
+            "INVALID_COMMAND"
         );
     }
     #[test]

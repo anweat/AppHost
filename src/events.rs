@@ -9,7 +9,6 @@ pub struct Cursor {
     pub sequence: u64,
 }
 
-#[cfg(any(target_os = "macos", test))]
 mod hub {
     use super::*;
     use crate::{Error, Result};
@@ -148,5 +147,4 @@ mod hub {
         }
     }
 }
-#[cfg(target_os = "macos")]
 pub(crate) use hub::Hub;

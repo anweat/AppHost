@@ -75,10 +75,7 @@ impl InstanceStatus {
     }
 }
 
-#[cfg(target_os = "macos")]
-pub mod collector;
-#[cfg(target_os = "macos")]
+pub use crate::platform::collector;
 pub mod lifecycle;
 
-#[cfg(target_os = "macos")]
 mod retention;

@@ -4,7 +4,7 @@ use super::{InstanceStatus, LaunchPlan, State, collector, retention};
 use crate::{
     Error, Result,
     journal::{self, Actor, Event, Outcome},
-    process::{self, Group},
+    platform::process::{self, Group},
     storage,
 };
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,6 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     fs,
-    net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Stdio},
     sync::{
@@ -363,7 +362,7 @@ fn wake(data: &Path) -> Result<Option<Wake>> {
     Ok(Some(saved))
 }
 
-pub(crate) struct Manager {
+pub struct Manager {
     data: PathBuf,
     handles: Mutex<BTreeMap<Uuid, Arc<Handle>>>,
     launch_dispatch: Mutex<()>,
@@ -1077,20 +1076,7 @@ impl Manager {
 fn receipt(r: &Record) -> Value {
     json!({"installation_id":r.installation_id,"instance_id":r.instance_id,"operation_id":r.operation_id,"operation_done":r.operation_done,"state":r.status.state(),"warnings":r.warnings,"operation_phase":coordination::phase(r)})
 }
-fn port_available(port: u16) -> Result<()> {
-    // macOS permits a reusable wildcard bind beside a specific-address listener
-    // (and vice versa). Check both addresses in both families. Keep REUSEADDR:
-    // a socket without it also rejects a closed server's harmless TIME_WAIT.
-    for host in ["0.0.0.0", "127.0.0.1", "[::]", "[::1]"] {
-        TcpListener::bind(format!("{host}:{port}")).map_err(|e| {
-            Error::new(
-                if e.kind() == std::io::ErrorKind::AddrInUse { "PORT_IN_USE" } else { "PORT_CHECK_FAILED" },
-                "Declared port is unavailable; no process was stopped",
-            ).details(json!({"port":port,"address":host,"reason":e.to_string(),"ownership":process::port_owners(port)}))
-        })?;
-    }
-    Ok(())
-}
+use crate::platform::port_available;
 
 impl Manager {
     pub fn dispatch(self: &Arc<Self>, request: &crate::daemon::protocol::Request) -> Result<Value> {
@@ -1108,6 +1094,7 @@ impl Manager {
                 | "stop-all"
                 | "resume-wake"
                 | "gateway-set-port"
+                | "log-retention-set"
         ) {
             // Durable installation operations record acceptance and completion in
             // save_record. Rejections, no-ops and global commands finish here.
@@ -1198,12 +1185,42 @@ impl Manager {
         struct FailureQuery {
             installation_id: Uuid,
             failure_id: Option<Uuid>,
+            #[serde(default)]
+            export: bool,
         }
         fn params<T: serde::de::DeserializeOwned>(v: &Value) -> Result<T> {
             serde_json::from_value(v.clone())
                 .map_err(|_| Error::new("INVALID_PARAMS", "Invalid runtime method parameters"))
         }
         match request.method.as_str() {
+            "log-retention" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Empty {}
+                params::<Empty>(&request.params)?;
+                Ok(json!(crate::log_retention::load(&self.data)?))
+            }
+            "log-retention-set" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Policy {
+                    days: u16,
+                    max_mib: u32,
+                }
+                let p = params::<Policy>(&request.params)?;
+                Ok(json!(crate::log_retention::save(
+                    &self.data, p.days, p.max_mib
+                )?))
+            }
+            "icon" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct IconQuery {
+                    installation_id: Uuid,
+                }
+                let p = params::<IconQuery>(&request.params)?;
+                Ok(json!(crate::icon::discover(&self.data, p.installation_id)?))
+            }
             "manifest-switch" => {
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
@@ -1334,12 +1351,56 @@ impl Manager {
             }
             "failure" => {
                 let p = params::<FailureQuery>(&request.params)?;
-                crate::failure::read(&self.data, p.installation_id, p.failure_id)
+                if p.export {
+                    crate::failure::export(&self.data, p.installation_id, p.failure_id)
+                } else {
+                    crate::failure::read(&self.data, p.installation_id, p.failure_id)
+                }
             }
             _ => Err(Error::new(
                 "METHOD_NOT_FOUND",
                 "Daemon method is not available",
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+    #[test]
+    fn configurable_archive_age_preserves_active_instances() {
+        let t = tempfile::tempdir().unwrap();
+        let data = t.path().join("data");
+        let manifest: crate::Manifest = serde_json::from_value(json!({"schema_version":1,"project_id":Uuid::new_v4(),"name":"fixture","services":[{"name":"web","command":["unused"]}]})).unwrap();
+        let id = Uuid::new_v4();
+        let mut old = declared_record(id, Uuid::new_v4(), &manifest, 0);
+        old.created_at_ms = now() - 2 * 24 * 60 * 60 * 1000;
+        old.status.request_stop();
+        old.status.finish_stop(true);
+        retention::archive(&data, &old).unwrap();
+        let mut active = old.clone();
+        active.instance_id = Uuid::new_v4();
+        retention::archive(&data, &active).unwrap();
+        crate::log_retention::save(&data, 3, 100).unwrap();
+        retention::prune(&data, id, active.instance_id).unwrap();
+        assert!(
+            data.join("instances")
+                .join(old.instance_id.to_string())
+                .exists()
+        );
+        crate::log_retention::save(&data, 1, 100).unwrap();
+        retention::prune(&data, id, active.instance_id).unwrap();
+        assert!(
+            !data
+                .join("instances")
+                .join(old.instance_id.to_string())
+                .exists()
+        );
+        assert!(
+            data.join("instances")
+                .join(active.instance_id.to_string())
+                .exists()
+        );
     }
 }

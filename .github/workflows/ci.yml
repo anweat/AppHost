@@ -30,7 +30,13 @@ jobs:
         run: cargo +stable test --locked --test m0 cli_smoke_node_python_and_explicit_native_manifest
       - name: Windows runtime boundary
         if: runner.os == 'Windows'
-        run: cargo +stable test --locked --test m1_platform --test m1_daemon_protocol --test m1_journal
+        run: cargo +stable test --locked --lib --test m1_platform --test m1_daemon_protocol --test m1_journal --test m1_delivery
       - name: macOS logging smoke
         if: runner.os == 'macOS'
         run: cargo +stable run --locked --example log_probe
+      - name: Windows portable installation smoke
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo +stable build --locked --release
+          ./tools/windows_smoke.ps1 -Exe ./target/release/apphost.exe

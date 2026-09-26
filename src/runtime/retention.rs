@@ -8,9 +8,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
-const BUDGET: u64 = 100 * 1024 * 1024;
 const ACTIVE_RESERVE: u64 = 9 * 1024 * 1024;
-const AGE: u128 = 7 * 24 * 60 * 60 * 1000;
 fn invalid() -> Error {
     Error::new(
         "RUNTIME_INVALID",
@@ -52,6 +50,9 @@ fn size(root: &Path, depth: usize, count: &mut usize) -> Result<u64> {
     Ok(total)
 }
 pub(super) fn prune(data: &Path, id: Uuid, active: Uuid) -> Result<Vec<serde_json::Value>> {
+    let policy = crate::log_retention::load(data)?;
+    let age = u128::from(policy.days) * 24 * 60 * 60 * 1000;
+    let budget = u64::from(policy.max_mib) * 1024 * 1024;
     let root = data.join("instances");
     let entries = match fs::read_dir(&root) {
         Ok(e) => e,
@@ -116,7 +117,7 @@ pub(super) fn prune(data: &Path, id: Uuid, active: Uuid) -> Result<Vec<serde_jso
     archives.sort_by_key(|entry| entry.0);
     let mut bytes: u64 = archives.iter().map(|a| a.1).sum();
     for (created, size, path) in archives {
-        if now.saturating_sub(created) > AGE || bytes > BUDGET - ACTIVE_RESERVE {
+        if now.saturating_sub(created) > age || bytes > budget - ACTIVE_RESERVE {
             fs::remove_dir_all(&path).map_err(|e| storage::io_error(&path, e))?;
             bytes = bytes.saturating_sub(size);
         }

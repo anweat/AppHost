@@ -118,7 +118,7 @@ offset / length 原始文件中的字节范围
 
 这表示观察顺序，不表示两个流的真实因果顺序。服务原名包含路径字符时必须编码或映射，不能直接拼进日志路径。
 
-每段有容量上限；创建新段后按最老段清理，原始文件和对应索引一起清理。缓冲、队列及索引都必须有界；超长行和二进制数据不引发无界分配。普通留存按安装总计 7 天 / 100 MB，失败现场另存，不能仅对单个 stdout 文件应用整个安装的预算。
+每段有容量上限；创建新段后按最老段清理，原始文件和对应索引一起清理。缓冲、队列及索引都必须有界；超长行和二进制数据不引发无界分配。普通留存默认按安装总计 7 天 / 100 MiB，可通过日志保留设置修改，失败现场另存，不能仅对单个 stdout 文件应用整个安装的预算。
 
 `logs::read_window` 按采集观察时间的闭区间读取完整字节块，单次正文上限 1 MiB、最多 4096 块、索引扫描上限 16 MiB。输出标明前缀被轮转淘汰、未完成的索引尾行、截断、序号缺口和时钟回退；原始数据缺失或索引越界返回错误。单块超过本次字节预算时不切块，返回截断标记。读取期间轮转导致文件消失要报告缺口，不将空结果描述为完整现场。窗口读取本身不证明采集器一直存活，也不证明失败后 10 秒已经结束，这些由失败采集流程记录。
 
@@ -188,7 +188,7 @@ wake.json 缺失且存在运行记录时，以最大 operation_epoch 加一恢�
 
 `logs` 窗口输入为 installation_id、instance_id、from_ms、to_ms、limit；时间为观察时间的闭区间，limit 为原始字节预算，1–131072，默认 65536。响应包含安全键与服务名映射、原始字节块及窗口缺口标记、实例 log_incomplete。JSON 字节数组会膨胀，仍受统一 1 MiB 响应上限。日志读取在独立 RPC 中进行，不占用生命周期工作线程；后续跟随读取不能阻塞停止。
 
-新实例替换已完成实例前，保存旧实例的只读 record.json，历史日志仍按 installation_id / instance_id 校验归属读取。启动和完整重启时清理过期或超量的普通归档：安装预算为 100 MiB，给当前实例预留 9 MiB，旧归档按创建时间淘汰并应用 7 天年龄上限；不删除活动或管理权不确定的实例。扫描上限 4096 个实例目录、15000 个归档条目；异常目录、链接或超限明确失败，不猜测归属。普通日志归档不承载 D9 的独立失败现场。
+新实例替换已完成实例前，保存旧实例的只读 record.json，历史日志仍按 installation_id / instance_id 校验归属读取。启动和完整重启时清理过期或超量的普通归档：安装预算默认 100 MiB，给当前实例预留 9 MiB，旧归档按创建时间淘汰并应用默认 7 天年龄上限；清理开始时读取当前日志保留设置；不删除活动或管理权不确定的实例。扫描上限 4096 个实例目录、15000 个归档条目；异常目录、链接或超限明确失败，不猜测归属。普通日志归档不承载 D9 的独立失败现场。
 
 ### 独立失败现场
 
@@ -217,7 +217,7 @@ daemon 使用一条独立的有界采集队列（64 项），最多保留 32 个
 | history | installation_id | 只读长期运行事实和最近成功基线；不自动拉起 daemon |
 | logs | installation_id、instance_id、from_ms、to_ms、limit | 有界观察窗口；返回服务映射和缺口标记，慢读不阻塞 stop |
 | url | installation_id | 只读解析稳定入口，不拉起 daemon 或 App |
-| failure | installation_id、failure_id 可选 | 返回结构化失败、证据和现场完整性 |
+| failure | installation_id、failure_id 可选、export 可选 | 返回结构化失败和核心建议；export=true 返回诊断预览 |
 | stop-all | 无 | 暂停自动唤醒、取消待启动、停止所有活动服务，返回逐项结果 |
 | resume-wake | 无 | 显式解除自动唤醒暂停，不启动 App、不改变取消代数 |
 | journal | cursor、limit | 有界读取操作日志 |
@@ -294,3 +294,32 @@ daemon 恢复只续接尚未派发采集器和服务的已保存目标意图，�
 `login show` 只读，缺少配置时返回 enabled=false；`login enable|disable` 是显式设置，返回 activation=next_login，下一次登录生效。macOS 在用户 LaunchAgents 目录保存按规范化 data-dir 的 SHA-256 区分的 plist，ProgramArguments 仅调用当前绝对可执行路径、--data-dir 与 daemon serve；RunAtLoad=true，不声明 App 的启动命令或 KeepAlive 重启策略。设置不调用 bootstrap/bootout，不改变当前 daemon 或 App；关闭只移除本工具带来源标记的对应 plist，未知文件冲突不覆盖。首次桌面设置仍要求用户明确选择，不因程序安装或读取设置自动开启。可执行文件移动后需显式重新启用以更新路径。平台不支持时返回 UNSUPPORTED_PLATFORM。
 
 `examples/measure_idle.py` 针对独立 data-dir 和可用的显式网关端口启动 release daemon，预热 5 秒后默认采样 60 秒；合并 daemon 及所有后代进程的 RSS 和累计 CPU 时间，进程集合变化时拒绝宣称完整测量，输出系统、硬件、二进制与版本。脚本只产生 JSON，不写测试报告；网络字节未纳入该脚本，输出明确标记，不能据此判定完整资源验收通过。
+
+
+### 核心失败建议与诊断预览
+
+`failure::advice(record, consecutive, managed_owner)` 返回 code、level、title、impact、evidence、actions、clears_when。level 使用 blocking / warning / suggestion / record；失败建议为 blocking，附属线索为 suggestion。`failure::read` 在响应的 advice 中合并当前已确认服务的有限项目线索，CLI、RPC 和桌面端共用这一结果。每份建议只有一个 primary=true 的主要操作，动作 ID 为稳定标识，argv 使用数组；所有动作都要求用户显式操作。受管端口占用优先 stop_owner_and_start，执行时仍由既有接口重核占用者安装和实例身份。外部占用先 retry，重复后 edit_manifest；EARLY_EXIT / UNKNOWN 首次完整重启，重复后 preview_diagnostics。DEPENDENCY_MISSING 首次在明确存在唯一包管理器锁文件时提供 copy_dependency_command，重复后 view_reason；没有明确命令则查看证据，不猜包管理器。依赖命令永远 copy_only，不自动执行。
+
+分类在有限 stderr 窗口内不区分大小写，保留原始匹配片段和行号，识别 EADDRINUSE、address already in use、Vite 的 Port <有效端口> is already in use，以及常见项目 CLI（vite、next、tsx、nuxt、webpack、astro、vue-cli-service）的 shell not found 诊断。结构化预检与身份错误不受日志覆盖。仅在已确认服务的受限 cwd 检查固定的 package.json、锁文件、pyproject.toml、requirements.txt 与 node_modules / .venv；目录缺失只返回提示，不改变分类，不增加扫描索引。多个锁文件的包管理器冲突时不生成命令；未观测的运行版本不猜测。
+
+`failure <id> --export [--failure-id <uuid>]` 与 failure RPC 的 export=true 返回 JSON 预览，和 --watch 互斥。sections 数组按 application、command、environment、category、evidence、output_tail、last_success 排序。命令标注为 current_confirmed_declaration_not_historical_argv，不用当前清单冒充失败时命令；现场失效、采集未完成、窗口缺口和当前环境读取失败都保留标记。共享 PATH 和正文再次进行尽力脱敏，不包含 env 原值；preview_required=true，复制和外发由用户决定。omitted 明确列出历史 argv、未探测版本、依赖指纹、浏览器 Console/Network 和留存窗口外输出等缺失内容。读取不创建目录、启动服务、探测版本或发送网络请求；没有现场目录保持 NOT_FOUND。
+
+### Agent 交付接口
+
+`apphost agent-guide` 不依赖 data-dir，输出 version、manifest、troubleshoot、project_prompt 四项 JSON；文本编译进二进制，离线安装时仍与版本一致。源文件为 agent/skills/manifest.md、agent/skills/troubleshoot.md、agent/project-prompt.md。项目提示词可粘贴到 AGENTS.md 或 CLAUDE.md，但命令不自动修改项目文件。
+
+`list --redacted [--all]` 是安全身份投影，只返回 installation_id、project_id、registration_state、requires_launch_confirmation、redacted；省略用户标签、路径、命令、完整清单和 env。普通 list 保留 M0 输出形状。Agent 用 status 读取运行观察、list --redacted 发现登记，不读取普通 list 用于分享。修改清单后 validate --check-launch，再请用户确认；不代为安装依赖、确认声明或 start/stop/restart/stop-all。
+
+### 本地图标
+
+`icon <installation_id>` / `icon` RPC 返回 Icon 或 null，固定顺序检查 icon.png、public/icon.png、public/favicon.png、favicon.ico、public/favicon.ico；不递归、不联网、不使用 SVG。每文件至多 256 KiB，PNG 签名及 IHDR 尺寸检查为 1–1024；ICO 目录至多 32 项，偏移和长度须在文件内。链接文件、越界路径、非法候选不使用，最终由前端首字回退。Icon 包含项目相对 path、mime、sha256、bytes。Tauri 通过 `icon::read(data,id,path,sha256)` 重新校验候选和摘要后取得字节，不直接打开前端提交的任意路径；摘要变化要求重新发现。光栅解码失败同样回退，不把头部检查宣称为完整图片解码。
+
+### 日志保留设置
+
+`log-retention show` / `log-retention` RPC 只读返回 schema_version=1、days、max_mib；缺省 7 天 / 每安装 100 MiB，不因读取创建配置。`log-retention set --days <1..365> --max-mib <10..10240>` / `log-retention-set` RPC 完整替换 `<data>/log-retention.json`，原子发布，非法输入保留旧设置；修改记操作记录。不同客户端完整设置按最后一次成功发布为准，不合并部分字段。设置只影响下一次启动或完整重启触发的普通归档清理，不立即删除，不改变活动日志分段上限与 9 MiB 预留，不删除活动或管理权不确定实例，不修改失败现场和 journal 的保留期限。
+
+### 平台边界与通用编译
+
+`platform` 集中进程组、身份与开机标识、监听归属、端口预检、环境、登录自启、退出观察、日志采集器和本地传输适配入口。通用 lifecycle、retention、events、failure capture、gateway 和 RPC session 不以 macOS 为编译条件。LocalStream 接口提供 authenticate/read_frame/write_frame；各平台适配器负责同用户身份与有界 IO 截止时间，再交给通用分发、订阅和日志跟随。macOS 使用 Unix socket；Windows 命名管道的安全与采集描述符传递仍随 G3 实现，不能替换为无鉴权 TCP。
+
+监听就绪适配区分启动期连接验证与运行期只读监听观察；假平台测试不创建服务，验证共同规则与假本地传输上的 Stop All 持久化恢复。Windows CI 编译全部生命周期并运行通用库、协议、登记冒烟和交付接口测试；这不等于 Windows 服务运行验收。Windows 的进程启动、采集器、自启和公开 daemon 入口在 M1-W 前保持 UNSUPPORTED_PLATFORM。

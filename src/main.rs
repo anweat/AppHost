@@ -19,6 +19,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Read version-matched, offline agent instructions.
+    AgentGuide,
+    /// Discover a bounded local raster icon without starting the app.
+    Icon { installation_id: Uuid },
+    /// Read or set global ordinary-log retention; failure evidence is independent.
+    LogRetention {
+        #[command(subcommand)]
+        command: LogRetentionCommand,
+    },
     /// Explicitly configure daemon startup at the next login.
     Login {
         #[command(subcommand)]
@@ -65,6 +74,8 @@ enum Command {
         /// Observe a port-conflict condition for at most 60 seconds, without retrying.
         #[arg(long)]
         watch: bool,
+        #[arg(long, conflicts_with = "watch")]
+        export: bool,
         #[arg(long)]
         failure_id: Option<Uuid>,
         #[arg(long)]
@@ -184,6 +195,9 @@ enum Command {
     List {
         #[arg(long)]
         all: bool,
+        /// Safe identity projection; excludes paths, declarations and env values.
+        #[arg(long)]
+        redacted: bool,
     },
     /// Stop managing an installation. Project files and manifest are retained.
     Detach {
@@ -194,6 +208,17 @@ enum Command {
     Label {
         installation_id: Uuid,
         label: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum LogRetentionCommand {
+    Show,
+    Set {
+        #[arg(long)]
+        days: u16,
+        #[arg(long)]
+        max_mib: u32,
     },
 }
 
@@ -322,6 +347,9 @@ fn data_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
 
 fn run(cli: Cli) -> Result<Option<Value>> {
     let action = match &cli.command {
+        Command::LogRetention {
+            command: LogRetentionCommand::Set { .. },
+        } => Some("log-retention-set"),
         Command::Import { .. } => Some("import"),
         Command::Label { .. } => Some("label"),
         Command::Detach { .. } => Some("detach"),
@@ -474,9 +502,13 @@ fn run_command(cli: Cli) -> Result<Option<Value>> {
             installation_id,
             failure_id,
             watch,
+            export,
             json: _,
         } => {
             let data = data_dir(cli.data_dir)?;
+            if export {
+                return apphost::failure::export(&data, installation_id, failure_id).map(Some);
+            }
             let evidence = apphost::failure::read(&data, installation_id, failure_id)?;
             if watch {
                 let id = evidence["failure"]["failure_id"].as_str().ok_or_else(|| {
@@ -794,7 +826,28 @@ fn run_command(cli: Cli) -> Result<Option<Value>> {
                 }
             }
         }
-        Command::List { all } => Ok(json!(apphost::list(&data_dir(cli.data_dir)?, all)?)),
+        Command::AgentGuide => Ok(apphost::agent::guide()),
+        Command::Icon { installation_id } => Ok(json!(apphost::icon::discover(
+            &data_dir(cli.data_dir)?,
+            installation_id
+        )?)),
+        Command::LogRetention { command } => {
+            let data = data_dir(cli.data_dir)?;
+            match command {
+                LogRetentionCommand::Show => Ok(json!(apphost::log_retention::load(&data)?)),
+                LogRetentionCommand::Set { days, max_mib } => {
+                    Ok(json!(apphost::log_retention::save(&data, days, max_mib)?))
+                }
+            }
+        }
+        Command::List { all, redacted } => {
+            let listings = apphost::list(&data_dir(cli.data_dir)?, all)?;
+            if redacted {
+                Ok(json!(listings.iter().map(|i|json!({"installation_id":i.installation.installation_id,"project_id":i.installation.project_id,"registration_state":i.registration_state,"requires_launch_confirmation":i.requires_launch_confirmation,"redacted":true})).collect::<Vec<_>>()))
+            } else {
+                Ok(json!(listings))
+            }
+        }
         Command::Detach { installation_ids } => {
             let data = data_dir(cli.data_dir)?;
             let coordinated = installation_ids

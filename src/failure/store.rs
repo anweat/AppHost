@@ -1,5 +1,4 @@
 use super::*;
-#[cfg(any(target_os = "macos", test))]
 use fs2::FileExt;
 use std::{fs, path::PathBuf};
 
@@ -41,7 +40,6 @@ fn check_directory(path: &Path) -> Result<()> {
     }
     storage::check_private_directory(path)
 }
-#[cfg(any(target_os = "macos", test))]
 fn writer(data: &Path, id: Uuid) -> Result<(PathBuf, fs::File)> {
     storage::private_directory(data)?;
     let root = data.join("failures");
@@ -91,7 +89,6 @@ pub fn read_history(data: &Path, id: Uuid) -> Result<History> {
     history(&dir)
 }
 
-#[cfg(any(target_os = "macos", test))]
 pub(crate) fn observe_run(data: &Path, id: Uuid, run: &RunObservation) -> Result<()> {
     let (dir, _lock) = writer(data, id)?;
     let mut h = history(&dir)?;
@@ -154,7 +151,6 @@ fn records(dir: &Path, id: Uuid) -> Result<Vec<Failure>> {
     out.sort_by_key(|f| std::cmp::Reverse((f.at_ms, f.failure_id)));
     Ok(out)
 }
-#[cfg(any(target_os = "macos", test))]
 pub(super) fn save(data: &Path, failure: &Failure, now: u128) -> Result<()> {
     let mut bounded = failure.clone();
     if serde_json::to_vec(&bounded.details)

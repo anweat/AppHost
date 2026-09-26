@@ -803,7 +803,8 @@ Structured Timeline:
 7 days
 
 Raw stdout/stderr:
-7 days or 100 MB / installation
+Default: 7 days or 100 MiB / installation
+Configurable in M1: 1–365 days, 10–10240 MiB / installation
 whichever comes first
 
 Failure Records:

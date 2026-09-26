@@ -130,9 +130,10 @@ fn expired() -> Error {
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
 
     struct Fixture {
         _temp: tempfile::TempDir,

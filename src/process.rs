@@ -29,10 +29,41 @@ pub fn observe_exit(_: &std::process::Child) -> crate::Result<Option<std::proces
 }
 
 #[cfg(not(target_os = "macos"))]
-pub struct Group;
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Group {
+    group: u32,
+    boot: (i64, i64),
+    known: Vec<Identity>,
+    exhausted: bool,
+}
 
 #[cfg(not(target_os = "macos"))]
 impl Group {
+    pub fn capture_spawned(_: &std::process::Child) -> crate::Result<Self> {
+        Err(unsupported())
+    }
+    pub fn id(&self) -> u32 {
+        self.group
+    }
+    pub fn reconcile(&mut self) -> crate::Result<Vec<Identity>> {
+        Err(unsupported())
+    }
+    pub fn port_ready(&mut self, _: u16) -> crate::Result<bool> {
+        Err(unsupported())
+    }
+    pub(crate) fn port_listening(_: &[Identity], _: u16) -> crate::Result<bool> {
+        Err(unsupported())
+    }
+    pub(crate) fn observed_listeners(_: &[Identity]) -> serde_json::Value {
+        serde_json::json!({"incomplete":true,"error_code":"UNSUPPORTED_PLATFORM","ports":[]})
+    }
+    pub(crate) fn listener_addresses(
+        &mut self,
+        _: u16,
+    ) -> crate::Result<Vec<std::net::SocketAddr>> {
+        Err(unsupported())
+    }
     pub fn capture(_: &mut std::process::Child) -> crate::Result<Self> {
         Err(unsupported())
     }
@@ -42,4 +73,9 @@ impl Group {
     pub fn stop(&mut self, _: std::time::Duration) -> crate::Result<bool> {
         Err(unsupported())
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn port_owners(_: u16) -> serde_json::Value {
+    serde_json::json!({"owners":[],"incomplete":true,"error_code":"UNSUPPORTED_PLATFORM"})
 }

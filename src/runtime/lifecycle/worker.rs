@@ -392,32 +392,26 @@ pub(super) fn run(
             if let Some(child) = &live.children[i]
                 && let Some(status) = process::observe_exit(child)?
             {
-                use std::os::unix::process::ExitStatusExt;
-                exit = Some(json!({"code":status.code(),"signal":status.signal()}));
+                exit = Some(crate::platform::exit_evidence(status));
             }
             let (port, starting) = {
                 let r = h.record.lock().unwrap();
                 (r.services[i].port, r.status.state() == State::Starting)
             };
-            let ready = if members.is_empty() {
-                false
-            } else if let Some(port) = port {
-                let observed = if starting {
-                    group.port_ready(port)
-                } else {
-                    Group::port_listening(&members, port)
-                };
-                match observed {
-                    Ok(v) => v,
-                    Err(e) => {
-                        let mut r = h.record.lock().unwrap();
-                        r.management_uncertain = true;
-                        r.status.fail(&e.code);
-                        false
-                    }
+            let ready = match crate::platform::service_ready(
+                group,
+                &members,
+                port,
+                starting,
+                started.elapsed(),
+            ) {
+                Ok(ready) => ready,
+                Err(e) => {
+                    let mut r = h.record.lock().unwrap();
+                    r.management_uncertain = true;
+                    r.status.fail(&e.code);
+                    false
                 }
-            } else {
-                started.elapsed() >= Duration::from_secs(2)
             };
             let capture_listeners = {
                 let r = h.record.lock().unwrap();
@@ -591,6 +585,7 @@ mod tests {
         let _guard = lock_dispatch(&gate);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn busy_dispatch_gate_does_not_block_collector_preparation() {
         let temp = tempfile::tempdir().unwrap();

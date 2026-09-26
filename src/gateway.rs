@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::Path;
 use uuid::Uuid;
-#[cfg(target_os = "macos")]
 pub(crate) mod server;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

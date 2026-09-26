@@ -502,8 +502,19 @@ mod tests {
                 let data = &data;
                 scope.spawn(move || {
                     for _ in 0..5 {
-                        append(data, &Event::new("label", Actor::Agent, Outcome::Succeeded))
-                            .unwrap();
+                        let event = Event::new("label", Actor::Agent, Outcome::Succeeded);
+                        let deadline = Instant::now() + Duration::from_secs(5);
+                        // BUSY is a bounded admission result, not lost data. Retry
+                        // the same event ID, just as the daemon's pending queue does.
+                        loop {
+                            match append(data, &event) {
+                                Ok(()) => break,
+                                Err(e) if e.code == "BUSY" && Instant::now() < deadline => {
+                                    std::thread::sleep(Duration::from_millis(10));
+                                }
+                                Err(e) => panic!("journal append failed: {e}"),
+                            }
+                        }
                     }
                 });
             }
