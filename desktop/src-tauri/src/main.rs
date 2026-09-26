@@ -2,6 +2,7 @@
 mod details;
 mod registration;
 mod runtime;
+mod settings;
 mod snapshot;
 
 // Web content cannot choose a data directory or submit arbitrary daemon methods.
@@ -49,7 +50,13 @@ fn main() {
             registration::desktop_import,
             registration::desktop_manifest_read,
             registration::desktop_manifest_review,
-            registration::desktop_manifest_save
+            registration::desktop_manifest_save,
+            settings::desktop_environment_read,
+            settings::desktop_environment_save,
+            settings::desktop_environment_capture,
+            settings::desktop_environment_check,
+            settings::desktop_retention_read,
+            settings::desktop_retention_save
         ])
         .run(tauri::generate_context!())
         .expect("Unable to run AppHost desktop");

@@ -190,3 +190,19 @@ kbd{font:11px system-ui;color:var(--muted)}
 .manifest-editor { display: block; width: 100%; min-height: 270px; resize: vertical; margin: 8px 0 16px; padding: 12px; font: 12px/1.7 ui-monospace, monospace; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; tab-size: 2; }
 .discard-prompt { position: fixed; z-index: 30; top: 88px; right: 24px; max-width: 360px; padding: 20px; background: var(--surface); color: var(--ink); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 36px #0002; }
 .discard-prompt button + button { margin-left: 8px; }
+.manage-content { width: 100%; min-width: 0; }
+.settings-page h2 { font-size: 20px; margin: 0; }
+.settings-page h3 { font-size: 14px; margin: 0 0 8px; }
+.settings-field { display: flex; flex-direction: column; gap: 8px; margin: 18px 0; }
+.settings-field small { color: var(--muted); font-size: 12px; }
+.settings-field textarea { width: 100%; resize: vertical; min-height: 100px; padding: 12px; font: 12px/1.7 ui-monospace, monospace; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; }
+.settings-field select { max-width: 320px; }
+.settings-page .setting input { width: 120px; }
+.settings-page .note { line-height: 1.7; margin-bottom: 20px; }
+.settings-message { color: var(--accent); font-size: 12px; overflow-wrap: anywhere; }
+.capture-confirm { border: 1px solid var(--line); border-radius: 6px; padding: 16px; }
+.capture-confirm p { color: var(--muted); font-size: 12px; line-height: 1.7; }
+.capture-confirm select { margin-left: 8px; }
+.settings-check { margin-top: 28px; padding-top: 24px; border-top: 1px solid var(--line); }
+.check-service { display: grid; grid-template-columns: 80px minmax(0,1fr); gap: 6px 12px; font-size: 12px; }
+.check-service dt { color: var(--muted); }.check-service dd { margin: 0; overflow-wrap: anywhere; }

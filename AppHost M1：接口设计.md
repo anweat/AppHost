@@ -350,3 +350,11 @@ daemon 恢复只续接尚未派发采集器和服务的已保存目标意图，�
 详情分为概览、日志、命令行和失败现场，复用原型样式。`desktop_logs(installation_id, instance_id)` 固定请求该实例最近五分钟的日志窗口，正文上限 64 KiB，复用 logs RPC 且不拉起 daemon。打开日志页或点击刷新时读取，不随运行快照轮询。显示观察时间、窗口范围、服务与 stdout/stderr，并保留核心返回的截断、轮转、序号缺口和采集不完整提示。离线或刷新失败时保留同一实例的上次内容并撤销实时描述；切换安装或实例后不沿用旧内容。文本以转义后的纯文本展示，不解释 ANSI 或 HTML。
 
 `desktop_failure(installation_id)` 直接读取核心的最新失败现场与 advice，离线可用，不在前端重算类别或连续次数。`desktop_diagnostics(installation_id, failure_id)` 固定现场身份，复用核心 export 的有序 sections、omitted 和脱敏标记；用户先预览，再点击复制。复制的是当前已预览文本，不在复制时重新生成另一份报告。`desktop_copy(text)` 最多复制 1 MiB 纯文本，只开放写入，不读取剪贴板，不发送网络请求。依赖建议仅复制，不执行；重试走已有显式 restart。edit_manifest / review_manifest 转到同一声明编辑器；其他尚未接入的建议保留核心操作说明及建议命令，明确标为命令行操作，不伪装成已执行。
+
+### 桌面环境与日志保留设置
+
+管理侧以外观、运行环境、日志保留三个页面呈现，复用现有配色；页面首次访问时读取，切换管理页面或返回磁贴保留编辑缓冲，不自动保存、采集或刷新。失败建议 `view_environment` 转到运行环境页并选中对应安装。
+
+`desktop_environment_read` 只读核心 Baseline；`desktop_environment_save(path)` 原样提交手动 PATH，沿用核心绝对目录、大小与数量校验，并清除旧采集来源。`desktop_environment_capture(shell)` 仅接受 zsh / bash，映射固定 `/bin/zsh` / `/bin/bash`；用户展开说明后明确点击“执行采集并保存 PATH”，才执行交互式登录脚本并保存结果。核心负责 5 秒 / 64 KiB 上限、进程组清理及并发保存校验。失败保留原配置和编辑缓冲，不自动重试；成功展示新的采集来源。上述修改仅影响后续启动。`desktop_environment_check(installation_id)` 使用已保存环境调用核心 LaunchPlan::prepare，返回安装身份和服务名、工作目录、可执行文件；不执行命令，不返回 env 原值。PATH 尚有未保存编辑时先保存再检查，结果明确区分检查通过与应用启动。
+
+`desktop_retention_read/save(days,max_mib)` 复用核心日志保留完整设置与边界，界面限制整数且展示生效时机；保存不触发清理或服务操作。环境和保留设置写入沿用 CLI 操作记录动作与 Human 身份，业务保存成功但 journal 写入失败时将 warnings 单独展示，不误报保存失败或自动重发。设置任务在阻塞工作线程执行，读写不隐式连接后台；平台不支持环境设置时只影响该页面。
