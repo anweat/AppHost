@@ -40,3 +40,32 @@ jobs:
         run: |
           cargo +stable build --locked --release
           ./tools/windows_smoke.ps1 -Exe ./target/release/apphost.exe
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      - name: Desktop Rust format
+        run: cargo +stable fmt --manifest-path src-tauri/Cargo.toml -- --check
+      - name: Desktop bridge Clippy
+        run: cargo +stable clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+      - name: Desktop bridge tests
+        run: cargo +stable test --locked --manifest-path src-tauri/Cargo.toml
+      - name: Compile embedded desktop frontend
+        run: cargo +stable build --locked --manifest-path src-tauri/Cargo.toml --features custom-protocol

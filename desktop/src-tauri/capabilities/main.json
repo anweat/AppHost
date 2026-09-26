@@ -1,0 +1,4 @@
+{
+  "identifier": "main", "description": "Local AppHost window; no filesystem or shell plugin access",
+  "windows": ["main"], "permissions": []
+}

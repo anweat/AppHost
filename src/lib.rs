@@ -13,6 +13,7 @@ pub mod log_retention;
 pub mod login;
 pub mod logs;
 pub mod manifest;
+pub mod paths;
 pub mod platform;
 pub mod process;
 pub mod registry;

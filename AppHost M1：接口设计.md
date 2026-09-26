@@ -259,7 +259,11 @@ CLI `journal [--cursor <event_id>] [--limit <1..200>] [--json]` 和同名 RPC �
 
 列表和详情消费 warnings、失败原因、服务 ready/alive 及操作结果。结构化警告不等于失败，不根据 stderr 是否非空推导运行状态；CLI 的成功 JSON 查询不向 stderr 输出警告。失败详情的端口信息以 ownership.found 决定是否展示监听者，以 limitations 解释查询受限；scope=first_match 不代表唯一占用者。
 
-桌面入口只承接用户的显式操作，复用核心的 scan/review/import、LaunchPlan 和运行管理契约，不在界面重新实现源码探测、声明确认或进程管理。真正的系统目录选择、核心声明校验、浏览器稳定入口、失败现场与操作记录接入分别沿对应设计实现；交互原型不替代这些能力的验证。首次桌面实现前再确定前端构建工具和 Tauri 桥接细节，不由无依赖 HTML 设计原型反向决定产品技术栈。
+桌面入口只承接用户的显式操作，复用核心的 scan/review/import、LaunchPlan 和运行管理契约，不在界面重新实现源码探测、声明确认或进程管理。真正的系统目录选择、核心声明校验、浏览器稳定入口、失败现场与操作记录接入分别沿对应设计实现；交互原型不替代这些能力的验证。正式桌面端采用 Tauri 2 + Vue 3 + TypeScript + Vite，沿用已确认原型的视觉与交互。Vue 组件只负责展示与发出动作，Rust 桥接层调用核心；不引入额外的全局运行状态管理框架。
+
+桌面工程放在 `desktop/`，与根目录 CLI 共用核心库和数据目录解析规则：显式目录优先，其次 APPHOST_DATA_DIR，再使用现有平台默认路径。WebView 不接受任意数据目录、任意文件读取或任意 daemon 方法名；系统操作由具名 Rust command 承接。构建锁定 npm 与 Cargo 依赖；开发服务只绑定回环地址，端口固定且被占用时报错。
+
+`desktop_snapshot()` 是只读观察接口，不创建目录或启动 daemon，返回 `{apps, live, read_at_ms, runtime_error}`。`apps` 按登记顺序排列，每项只包含 installation_id、project_id、label、path、registration_state、requires_confirmation 与可选 runtime；runtime 仅包含实例 ID、安装 ID、五态、失败代码、记录更新时间及服务 name/port/alive/ready。该列表接口不向 WebView 传递 confirmed_services、confirmed_manifest、env 或 launch_context。运行查询错误保留为 runtime_error，不把未知状态当作 STOPPED；已成功取得的历史记录保留其五态和更新时间。整个读取失败时前端保留上次成功结果、撤销 live 标识并显示读取错误。没有事件订阅的快照必须显示观察时间，不能宣称持续实时；显式刷新期间合并重复读取请求。
 
 桌面反馈（冻结稿 5.9、10.4）需要接口提供以下数据，前端只做比较和展示，不自行推断或累计：
 
