@@ -6,7 +6,7 @@ const props = defineProps<{ app: AppEntry; snapshot: Snapshot }>();
 defineEmits<{ details: [id: string]; primary: [id: string] }>();
 const label = computed(() => [props.app.label, stateLabel(props.app, props.snapshot),
   props.app.registration_state === 'SOURCE_MISSING' ? '源码目录不可用' : props.app.requires_confirmation ? '启动声明待确认' : '',
-  !props.snapshot.live ? '查看连接状态' : props.app.requires_confirmation || props.app.registration_state === 'SOURCE_MISSING' ? '查看详情' : ['STARTING', 'STOPPING'].includes(props.app.runtime?.status.state || '') ? '请等待当前操作' : props.app.runtime?.status.state === 'RUNNING' ? props.app.has_entry ? '打开应用' : '查看详情' : '启动应用',
+  !props.snapshot.live ? '查看连接状态' : props.app.requires_confirmation || props.app.registration_state === 'SOURCE_MISSING' ? '查看详情' : ['STARTING', 'STOPPING'].includes(props.app.runtime?.status.state || '') ? '请等待当前操作' : props.app.runtime?.status.state === 'RUNNING' ? props.app.has_entry ? '打开应用' : '查看日志' : '启动应用',
 ].filter(Boolean).join('，'));
 </script>
 <template>

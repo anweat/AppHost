@@ -35,6 +35,7 @@ const counts = computed(() => ({
 const search = ref('');
 const searchInput = ref<HTMLInputElement>();
 const selectedId = ref<string | null>(null);
+const detailTab = ref('overview');
 const selected = computed(() => displayed.value?.apps.find(app => app.installation_id === selectedId.value));
 const filtered = computed(() => displayed.value?.apps.filter(app => app.label.toLocaleLowerCase().includes(search.value.trim().toLocaleLowerCase())) ?? []);
 async function primary(id: string) {
@@ -45,13 +46,14 @@ async function primary(id: string) {
   if (state === 'STARTING' || state === 'STOPPING') return;
   if (state === 'RUNNING') {
     if (app.has_entry && app.runtime?.operation_id) await runtime.open(id, { instance: app.runtime.instance_id, operation: app.runtime.operation_id });
-    else void details(id);
+    else void details(id, 'logs');
   } else await runtime.action(state === 'FAILED' && app.runtime?.services.some(service => service.alive) ? 'restart' : 'start', id);
 }
 let returnFocus: HTMLElement | null = null;
-async function details(id: string) {
+async function details(id: string, tab = 'overview') {
   returnFocus = document.activeElement as HTMLElement;
   selectedId.value = id;
+  detailTab.value = tab;
   await nextTick();
   document.querySelector<HTMLButtonElement>('.drawer button')?.focus();
 }
@@ -64,7 +66,13 @@ function keys(event: KeyboardEvent) {
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
     event.preventDefault(); searchInput.value?.focus();
   }
-  if (event.key === 'Escape' && !selectedId.value) search.value = '';
+  if (event.key === 'Escape') {
+    // macOS WebView buttons can leave focus on the page after a panel changes.
+    // Escape must still close the visible non-modal details and restore its tile.
+    if (selectedId.value) void closeDetails();
+    else search.value = '';
+    connectionOpen.value = false;
+  }
 }
 onMounted(() => { void loadTheme(); void refresh(); runtime.startWatch(); window.addEventListener('keydown', keys); });
 onUnmounted(() => { runtime.dispose(); window.removeEventListener('keydown', keys); });
@@ -98,7 +106,7 @@ onUnmounted(() => { runtime.dispose(); window.removeEventListener('keydown', key
         <TileBoard v-else-if="filtered.length && displayed" :apps="filtered" :snapshot="displayed" :lens="lens" @details="details" @primary="primary"/>
         <div v-else-if="!loading" class="empty"><h2>{{ error ? '暂时无法读取应用' : displayed?.apps.length ? '没有匹配的应用' : '还没有应用' }}</h2><p>{{ error ? '检查后台或目录后重试。' : displayed?.apps.length ? '试试其他名称。' : '已登记的应用会出现在这里。' }}</p><button v-if="search" @click="search = ''">清除搜索</button><button v-else @click="refresh">重新读取</button></div>
       </main>
-      <AppDetails v-if="selected && displayed && view === 'home'" :app="selected" :snapshot="displayed" :busy="runtime.busy.value.has(selected.installation_id)" @action="runtime.action($event, selected.installation_id)" @close="closeDetails" />
+      <AppDetails v-if="selected && displayed && view === 'home'" :key="selected.installation_id" v-model:tab="detailTab" :app="selected" :snapshot="displayed" :busy="runtime.busy.value.has(selected.installation_id)" @action="runtime.action($event, selected.installation_id)" @close="closeDetails" />
     </div>
   </div>
 </template>
