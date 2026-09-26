@@ -9,6 +9,15 @@ use std::{
 pub const MAX_BYTES: u64 = 1024 * 1024;
 pub const MAX_FINGERPRINT_BYTES: u64 = 16 * 1024 * 1024;
 
+pub(crate) fn lock_contended(error: &std::io::Error) -> bool {
+    // Windows ERROR_LOCK_VIOLATION is not mapped to WouldBlock by std::io.
+    // Use fs2's platform code without treating unrelated IO failures as busy.
+    error.kind() == std::io::ErrorKind::WouldBlock
+        || error
+            .raw_os_error()
+            .is_some_and(|code| Some(code) == fs2::lock_contended_error().raw_os_error())
+}
+
 pub fn io_error(path: &Path, error: std::io::Error) -> Error {
     let code = if error.kind() == std::io::ErrorKind::NotFound {
         "NOT_FOUND"

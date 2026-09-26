@@ -25,9 +25,9 @@ jobs:
       - name: macOS regression suite
         if: runner.os == 'macOS'
         run: cargo +stable test --locked --all-targets
-      - name: Windows M0 CLI smoke
+      - name: Windows M0 registration and CLI tests
         if: runner.os == 'Windows'
-        run: cargo +stable test --locked --test m0 cli_smoke_node_python_and_explicit_native_manifest
+        run: cargo +stable test --locked --test m0
       - name: Windows runtime boundary
         if: runner.os == 'Windows'
         run: cargo +stable test --locked --lib --test m1_platform --test m1_daemon_protocol --test m1_journal --test m1_delivery

@@ -474,11 +474,14 @@ fn failed_registry_publish_keeps_manifest_and_allows_retry() {
     }
     let draft = scan(&path, 0).unwrap();
     // A nearly full valid registry fails its size boundary after the first project file is published.
-    let huge_label = "x".repeat(1024 * 1024 - 300);
-    let registry = json!({"schema_version":0,"installations":[{
+    let mut registry = json!({"schema_version":0,"installations":[{
         "installation_id": Uuid::new_v4(), "project_id": Uuid::new_v4(),
-        "path":"/already/registered", "human_label":huge_label, "detached":false
+        "path":temp.path().join("already-registered"), "human_label":"", "detached":false
     }]});
+    // Use an absolute path on each OS and calculate the byte boundary after
+    // JSON path escaping; /already/registered is not absolute on Windows.
+    let label_bytes = 1024 * 1024 - 32 - serde_json::to_vec(&registry).unwrap().len();
+    registry["installations"][0]["human_label"] = json!("x".repeat(label_bytes));
     let bytes = serde_json::to_vec(&registry).unwrap();
     assert!(bytes.len() < 1024 * 1024);
     fs::write(data.join("registry.json"), bytes).unwrap();

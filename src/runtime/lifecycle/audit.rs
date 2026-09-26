@@ -132,8 +132,8 @@ mod tests {
         .unwrap();
         fs::write(root.join("apphost.toml"), manifest.to_toml().unwrap()).unwrap();
         let id = crate::import(&data, &crate::scan(&root, 0).unwrap()).unwrap()[0].installation_id;
-        let plan = LaunchPlan::prepare(&data, id).unwrap();
-        let mut r = new_record(id, Uuid::new_v4(), &plan, 0);
+        // Journal queue repair needs a declared record, not OS launch preparation.
+        let mut r = declared_record(id, Uuid::new_v4(), &manifest, 0);
         for _ in 0..33 {
             let mut e = Event::new("stop", Actor::Human, Outcome::Succeeded);
             e.installation_id = Some(id);

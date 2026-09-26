@@ -408,7 +408,7 @@ fn lock_wait(data_dir: &Path, timeout: std::time::Duration) -> Result<RegistryLo
     loop {
         match FileExt::try_lock_exclusive(&file) {
             Ok(()) => break,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(e) if storage::lock_contended(&e) => {
                 if std::time::Instant::now() >= deadline {
                     return Err(Error::new(
                         "BUSY",
