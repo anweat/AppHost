@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue';
 import { invoke, isTauri } from '@tauri-apps/api/core';
+import ImportPanel from './components/ImportPanel.vue';
 import TileBoard from './components/TileBoard.vue';
 import AppIcon from './components/AppIcon.vue';
 import AppearanceSettings from './components/AppearanceSettings.vue';
@@ -36,6 +37,14 @@ const search = ref('');
 const searchInput = ref<HTMLInputElement>();
 const selectedId = ref<string | null>(null);
 const detailTab = ref('overview');
+const importing = ref(false), importBusy = ref(false), editorDirty = ref(false), discardPrompt = ref(false);
+let afterDiscard: (() => void) | undefined;
+function guard(change: () => void) {
+  if (editorDirty.value) { afterDiscard = change; discardPrompt.value = true; }
+  else change();
+}
+function discard() { editorDirty.value = false; discardPrompt.value = false; afterDiscard?.(); afterDiscard = undefined; }
+function add() { if (importing.value) return; guard(() => { selectedId.value = null; importing.value = true; view.value = 'home'; }); }
 const selected = computed(() => displayed.value?.apps.find(app => app.installation_id === selectedId.value));
 const filtered = computed(() => displayed.value?.apps.filter(app => app.label.toLocaleLowerCase().includes(search.value.trim().toLocaleLowerCase())) ?? []);
 async function primary(id: string) {
@@ -51,6 +60,9 @@ async function primary(id: string) {
 }
 let returnFocus: HTMLElement | null = null;
 async function details(id: string, tab = 'overview') {
+  if (importing.value && importBusy.value) return;
+  if (editorDirty.value && selectedId.value !== id) { guard(() => { void details(id, tab); }); return; }
+  importing.value = false;
   returnFocus = document.activeElement as HTMLElement;
   selectedId.value = id;
   detailTab.value = tab;
@@ -58,6 +70,7 @@ async function details(id: string, tab = 'overview') {
   document.querySelector<HTMLButtonElement>('.drawer button')?.focus();
 }
 async function closeDetails() {
+  if (editorDirty.value) { guard(() => { void closeDetails(); }); return; }
   selectedId.value = null;
   await nextTick();
   if (returnFocus?.isConnected) returnFocus.focus();
@@ -67,9 +80,11 @@ function keys(event: KeyboardEvent) {
     event.preventDefault(); searchInput.value?.focus();
   }
   if (event.key === 'Escape') {
+    if (discardPrompt.value) { discardPrompt.value = false; afterDiscard = undefined; return; }
     // macOS WebView buttons can leave focus on the page after a panel changes.
     // Escape must still close the visible non-modal details and restore its tile.
     if (selectedId.value) void closeDetails();
+    else if (importing.value && !importBusy.value) importing.value = false;
     else search.value = '';
     connectionOpen.value = false;
   }
@@ -89,7 +104,7 @@ onUnmounted(() => { runtime.dispose(); window.removeEventListener('keydown', key
       </div>
       <button v-if="displayed?.automatic_wake_paused" class="lens paused" :disabled="!displayed.live" title="恢复自动唤醒" @click="runtime.action('resume-wake')">恢复唤醒</button>
       <button class="stop-all" :disabled="!displayed?.live || (!counts.running && runtime.busy.value.size === 0) || runtime.busy.value.has('stop-all')" @click="runtime.action('stop-all')"><AppIcon name="stop"/><span>全部停止</span></button>
-      <div class="bar-actions"><button class="icon-btn" aria-label="刷新应用与状态" :disabled="loading" @click="refresh"><AppIcon name="refresh"/></button>
+      <div class="bar-actions"><button class="icon-btn" aria-label="添加应用" @click="add">＋</button><button class="icon-btn" aria-label="刷新应用与状态" :disabled="loading" @click="refresh"><AppIcon name="refresh"/></button>
         <button class="icon-btn" aria-label="管理" :aria-current="view === 'manage' ? 'page' : undefined" @click="view = view === 'manage' ? 'home' : 'manage'"><AppIcon name="settings"/></button>
       </div>
       <section v-if="connectionOpen" class="connection-panel" aria-label="后台连接">
@@ -100,13 +115,15 @@ onUnmounted(() => { runtime.dispose(); window.removeEventListener('keydown', key
       </section>
     </header>
     <div v-if="runtime.message.value || preferenceError || (error && error.code !== 'DAEMON_UNAVAILABLE')" class="activity-result" role="status"><span>{{ preferenceError || runtime.message.value || error?.message }}</span><button class="icon-btn" aria-label="收起提示" @click="runtime.message.value = ''; preferenceError = ''"><AppIcon name="close"/></button></div>
+    <div v-if="discardPrompt" class="discard-prompt" role="alertdialog" aria-label="未保存的启动声明"><p>启动声明尚未保存，丢弃编辑？</p><button @click="discard">丢弃编辑</button><button class="primary" @click="discardPrompt = false; afterDiscard = undefined">继续编辑</button></div>
     <div class="workspace">
       <main :aria-busy="loading">
         <AppearanceSettings v-if="view === 'manage'" :theme="theme" :saving="savingTheme" @theme="saveTheme" @home="view = 'home'"/>
         <TileBoard v-else-if="filtered.length && displayed" :apps="filtered" :snapshot="displayed" :lens="lens" @details="details" @primary="primary"/>
-        <div v-else-if="!loading" class="empty"><h2>{{ error ? '暂时无法读取应用' : displayed?.apps.length ? '没有匹配的应用' : '还没有应用' }}</h2><p>{{ error ? '检查后台或目录后重试。' : displayed?.apps.length ? '试试其他名称。' : '已登记的应用会出现在这里。' }}</p><button v-if="search" @click="search = ''">清除搜索</button><button v-else @click="refresh">重新读取</button></div>
+        <div v-else-if="!loading" class="empty"><h2>{{ error ? '暂时无法读取应用' : displayed?.apps.length ? '没有匹配的应用' : '还没有应用' }}</h2><p>{{ error ? '检查后台或目录后重试。' : displayed?.apps.length ? '试试其他名称。' : '选择项目目录，确认后加入磁贴。' }}</p><button v-if="search" @click="search = ''">清除搜索</button><button v-else-if="!error" class="primary" @click="add">＋ 添加应用</button><button v-else @click="refresh">重新读取</button></div>
       </main>
-      <AppDetails v-if="selected && displayed && view === 'home'" :key="selected.installation_id" v-model:tab="detailTab" :app="selected" :snapshot="displayed" :busy="runtime.busy.value.has(selected.installation_id)" @action="runtime.action($event, selected.installation_id)" @close="closeDetails" />
+      <AppDetails v-if="selected && displayed" v-show="view === 'home'" :key="selected.installation_id" v-model:tab="detailTab" :app="selected" :snapshot="displayed" :busy="runtime.busy.value.has(selected.installation_id)" @action="runtime.action($event, selected.installation_id)" @close="closeDetails" @changed="runtime.message.value = ''; invalidate()" @dirty="editorDirty = $event" />
+      <ImportPanel v-if="importing" @close="importing = false" @busy="importBusy = $event" @changed="invalidate"/>
     </div>
   </div>
 </template>

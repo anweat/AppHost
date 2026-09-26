@@ -337,8 +337,16 @@ daemon 恢复只续接尚未派发采集器和服务的已保存目标意图，�
 监听就绪适配区分启动期连接验证与运行期只读监听观察；假平台测试不创建服务，验证共同规则与假本地传输上的 Stop All 持久化恢复。Windows CI 编译全部生命周期并运行通用库、协议、登记冒烟和交付接口测试；这不等于 Windows 服务运行验收。Windows 的进程启动、采集器、自启和公开 daemon 入口在 M1-W 前保持 UNSUPPORTED_PLATFORM。
 
 
+### 桌面导入与声明确认
+
+`desktop_scan()` 通过原生目录选择器选择根目录，取消返回 null；沿用核心默认扫描限额、登记源解析和启动变更注记，读取过程不写项目或登记。Rust 只保留一个不超过 1 MiB 的临时 Draft，返回 token 与展示副本，不保存额外草稿文件；前端只提交 token、分组选择或候选序号，不接受前端提供的根路径、来源证据或清单改写。分组变动更换 token，导入消费 token，旧请求不可重放。候选初始不勾选，用户选择后展示服务 argv、工作目录及完整清单；分组建议必须明确合并或分别登记，合并调用核心 `accept_group`。缺少有效声明的候选暂保留 CLI review 入口，不猜启动命令。
+
+`desktop_import(token, selected)` 仅在明确确认后调用核心 import，按所选声明设置确认摘要，核心仍在写入前检查来源证据、身份和路径边界。已有清单不覆盖，导入不启动服务。桌面只接收安装身份、路径、创建文件及警告的回执，不把 confirmed_services/env 再混入应用列表。失败保留 completed 结果，刷新登记列表，并要求重新扫描后继续，不自动重发旧草稿。草稿限制为 1 MiB。
+
+`desktop_manifest_read/review/save` 复用核心文本编辑契约。读取返回 revision、文件摘要、原始文本；复核展示上次确认、当前文件与拟保存内容，读取以来的文件或登记变化须重新读取后处理，编辑缓冲不会被错误响应覆盖。继续编辑立即使旧复核失效。保存提交复核对应的 revision、base_sha256、confirmed_launch_sha256 和原始文本；有运行记录且后台离线时要求用户显式连接，不由 GUI 使用 current_exe 隐式拉起后台。有运行实例时跟踪 operation_id，接受回执不代表保存成功，停止或保存失败保留缓冲；断连不自动重发。用户可以结束等待并重新读取核对。完成后保持停止，不自动启动。详情标签切换保留缓冲，切换应用或关闭带未保存编辑的详情须明确丢弃。
+
 ### 桌面详情读取与复制
 
 详情分为概览、日志、命令行和失败现场，复用原型样式。`desktop_logs(installation_id, instance_id)` 固定请求该实例最近五分钟的日志窗口，正文上限 64 KiB，复用 logs RPC 且不拉起 daemon。打开日志页或点击刷新时读取，不随运行快照轮询。显示观察时间、窗口范围、服务与 stdout/stderr，并保留核心返回的截断、轮转、序号缺口和采集不完整提示。离线或刷新失败时保留同一实例的上次内容并撤销实时描述；切换安装或实例后不沿用旧内容。文本以转义后的纯文本展示，不解释 ANSI 或 HTML。
 
-`desktop_failure(installation_id)` 直接读取核心的最新失败现场与 advice，离线可用，不在前端重算类别或连续次数。`desktop_diagnostics(installation_id, failure_id)` 固定现场身份，复用核心 export 的有序 sections、omitted 和脱敏标记；用户先预览，再点击复制。复制的是当前已预览文本，不在复制时重新生成另一份报告。`desktop_copy(text)` 最多复制 1 MiB 纯文本，只开放写入，不读取剪贴板，不发送网络请求。依赖建议仅复制，不执行；重试走已有显式 restart。尚未接入桌面编辑器的建议保留核心操作说明及建议命令，明确标为命令行操作，不伪装成已执行。
+`desktop_failure(installation_id)` 直接读取核心的最新失败现场与 advice，离线可用，不在前端重算类别或连续次数。`desktop_diagnostics(installation_id, failure_id)` 固定现场身份，复用核心 export 的有序 sections、omitted 和脱敏标记；用户先预览，再点击复制。复制的是当前已预览文本，不在复制时重新生成另一份报告。`desktop_copy(text)` 最多复制 1 MiB 纯文本，只开放写入，不读取剪贴板，不发送网络请求。依赖建议仅复制，不执行；重试走已有显式 restart。edit_manifest / review_manifest 转到同一声明编辑器；其他尚未接入的建议保留核心操作说明及建议命令，明确标为命令行操作，不伪装成已执行。

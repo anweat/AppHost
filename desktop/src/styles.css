@@ -177,3 +177,16 @@ kbd{font:11px system-ui;color:var(--muted)}
 .log-output{margin:16px 0;max-height:50vh;overflow:auto;border:1px solid var(--line);border-radius:6px;background:var(--subtle);padding:12px}.log-entry small{color:var(--muted);font-size:10px}.log-entry pre{margin:2px 0 12px;padding:0;border:0;max-height:none}
 .failure-title{margin:16px 0 8px}.failure-action{margin:16px 0;padding:14px 0;border-block:1px solid var(--line)}.detail-body details{margin:20px 0}.detail-body summary{cursor:pointer;color:var(--muted)}.evidence-link{display:inline-block;padding:8px 14px;border-radius:4px;text-decoration:none;font-size:13px}
 .diagnostic-preview textarea{width:100%;height:45vh;resize:vertical;white-space:pre-wrap;font:12px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace;margin:14px 0}.diagnostic-preview>button{margin-bottom:10px}
+
+/* Review surfaces reuse the prototype palette; the tile board keeps its positions. */
+.import-panel { width: min(480px, 48vw); }
+.import-choices { border: 0; margin: 0; padding: 0; min-width: 0; }
+.import-candidate { padding: 16px 0; border-bottom: 1px solid var(--line); }
+.import-candidate label { display: flex; align-items: center; gap: 10px; font-weight: 600; }
+.import-candidate input { accent-color: var(--accent); width: 17px; height: 17px; }
+.path-text { overflow-wrap: anywhere; white-space: pre-wrap; }
+.declaration-preview { max-height: 340px; }
+.editor-label { display: block; font-size: 12px; }
+.manifest-editor { display: block; width: 100%; min-height: 270px; resize: vertical; margin: 8px 0 16px; padding: 12px; font: 12px/1.7 ui-monospace, monospace; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; tab-size: 2; }
+.discard-prompt { position: fixed; z-index: 30; top: 88px; right: 24px; max-width: 360px; padding: 20px; background: var(--surface); color: var(--ink); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 36px #0002; }
+.discard-prompt button + button { margin-left: 8px; }

@@ -6,7 +6,7 @@ import { commandText, type FailureReport } from '../diagnostics';
 import { errorMessage } from '../model';
 import DiagnosticPreview from './DiagnosticPreview.vue';
 const props = defineProps<{ installationId: string; canRetry: boolean }>();
-defineEmits<{ retry: [] }>();
+defineEmits<{ retry: []; edit: [] }>();
 const { data, error, loading, refresh } = useDetailRead(() => invoke<FailureReport>('desktop_failure', { installationId:props.installationId }));
 const preview = ref(false), message = ref('');
 const primary = computed(() => data.value?.advice?.actions.find(action => action.primary));
@@ -36,6 +36,7 @@ onMounted(refresh);
         <div v-if="primary" class="failure-action">
           <button v-if="primary.id === 'retry'" class="primary" :disabled="!canRetry" @click="$emit('retry')">{{ primary.title }}</button>
           <button v-else-if="primary.id === 'preview_diagnostics'" class="primary" :disabled="!failureId" @click="preview = true">{{ primary.title }}</button>
+          <button v-else-if="['edit_manifest','review_manifest'].includes(primary.id)" class="primary" @click="$emit('edit')">{{ primary.title }}</button>
           <button v-else-if="primary.copy_only" class="primary" @click="copyCommand">{{ primary.title }}</button>
           <a v-else-if="primary.id === 'view_reason'" class="primary evidence-link" href="#failure-evidence">{{ primary.title }}</a>
           <template v-else><strong>{{ primary.title }}</strong><p class="muted">此操作请在命令行中完成。</p></template>

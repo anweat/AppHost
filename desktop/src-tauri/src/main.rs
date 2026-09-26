@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod details;
+mod registration;
 mod runtime;
 mod snapshot;
 
@@ -26,7 +27,9 @@ async fn desktop_theme(theme: apphost::ui::Theme) -> apphost::Result<apphost::ui
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(runtime::Bridge::default())
+        .manage(registration::DraftBuffer::default())
         .invoke_handler(tauri::generate_handler![
             desktop_snapshot,
             runtime::desktop_connect,
@@ -40,7 +43,13 @@ fn main() {
             details::desktop_failure,
             details::desktop_diagnostics,
             details::desktop_terminal,
-            details::desktop_copy
+            details::desktop_copy,
+            registration::desktop_scan,
+            registration::desktop_group,
+            registration::desktop_import,
+            registration::desktop_manifest_read,
+            registration::desktop_manifest_review,
+            registration::desktop_manifest_save
         ])
         .run(tauri::generate_context!())
         .expect("Unable to run AppHost desktop");
