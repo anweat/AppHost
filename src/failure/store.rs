@@ -70,7 +70,8 @@ fn writer(data: &Path, id: Uuid) -> Result<(PathBuf, fs::File)> {
     loop {
         match lock.try_lock_exclusive() {
             Ok(()) => break,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            // Windows lock contention uses ERROR_LOCK_VIOLATION, not WouldBlock.
+            Err(e) if storage::lock_contended(&e) => {
                 if std::time::Instant::now() >= until {
                     return Err(Error::new("BUSY", "Failure evidence writer is busy"));
                 }

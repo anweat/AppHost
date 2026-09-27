@@ -174,7 +174,8 @@ fn update(data: &Path, edit: impl FnOnce(&mut Preferences) -> Result<()>) -> Res
     loop {
         match fs2::FileExt::try_lock_exclusive(&lock) {
             Ok(()) => break,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            // Windows lock contention uses ERROR_LOCK_VIOLATION, not WouldBlock.
+            Err(e) if storage::lock_contended(&e) => {
                 if std::time::Instant::now() >= deadline {
                     return Err(Error::new("BUSY", "Appearance settings are being saved"));
                 }
