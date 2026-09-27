@@ -7,3 +7,7 @@
 /desktop/src-tauri/target/
 /desktop/src-tauri/gen/
 /desktop/src-tauri/binaries/
+
+# Local agent configuration and release archives are not source artifacts.
+/.claude/
+/release/
