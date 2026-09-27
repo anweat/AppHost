@@ -246,3 +246,10 @@ kbd{font:11px system-ui;color:var(--muted)}
 
 /* Reserve six recent slots so usage changes never shift the ordinary groups. */
 .recent .group-grid { grid-template-columns:repeat(2,76px); grid-template-rows:repeat(3,76px); grid-auto-flow:row; }
+
+.login-choice { display:flex; align-items:center; gap:12px; padding:12px 24px; border-bottom:1px solid var(--line); background:var(--surface); color:var(--ink); flex-wrap:wrap; }
+.login-choice p { margin:4px 0 0; color:var(--muted); font-size:12px; }
+.login-choice > div { flex:1; min-width:220px; }
+.tile-feedback p { margin:6px 0; }
+.tile-feedback button { float:none; display:inline-block; padding:4px; text-decoration:underline; }
+.tile-feedback .bubble-close { float:right; text-decoration:none; }

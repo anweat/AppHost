@@ -3,9 +3,10 @@ import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue';
 import AppTile from './AppTile.vue';
 import type { Preferences } from '../preferences';
 import type { SearchAction } from '../search';
-import type { AppEntry, Snapshot } from '../model';
-const props = defineProps<{ apps: AppEntry[]; snapshot: Snapshot; lens: string | null; preferences:Preferences; feedback:Map<string,string> }>();
-const emit = defineEmits<{ details: [id: string]; primary: [id: string]; preference:[value:unknown]; batch:[kind:'start'|'stop',ids:string[]]; action:[action:SearchAction,id:string]; manage:[]; dismiss:[id:string] }>();
+import { runtimeBlocked, type AppEntry, type Snapshot } from '../model';
+import type { Feedback } from '../useFeedback';
+const props = defineProps<{ apps: AppEntry[]; snapshot: Snapshot; lens: string | null; preferences:Preferences; feedback:Map<string,Feedback> }>();
+const emit = defineEmits<{ details: [id: string]; primary: [id: string]; preference:[value:unknown]; batch:[kind:'start'|'stop',ids:string[]]; action:[action:SearchAction,id:string]; manage:[]; dismiss:[id:string]; feedbackAction:[id:string,item:Feedback] }>();
 const groups = computed(() => {
   const result = new Map<string, { name: string; apps: AppEntry[] }>();
   for (const app of props.apps) {
@@ -75,16 +76,16 @@ onUnmounted(() => {observer?.disconnect();window.removeEventListener('click',clo
 <template>
   <div ref="board" class="board" :data-offline="!snapshot.live" :data-lens="lens" data-at-start data-at-end @wheel="scroll" @keydown="navigate">
     <div class="canvas">
-      <section v-if="recent.length" class="group recent" aria-label="最近使用"><h2 class="group-title">最近使用 <button class="group-control" @click="$emit('preference',{kind:'recent',enabled:false})" aria-label="关闭最近使用组">×</button></h2><div class="group-grid"><AppTile v-for="app in recent" :key="app.installation_id" :app="app" :snapshot="snapshot" :feedback="feedback.get(app.installation_id)" @dismiss="$emit('dismiss',$event)" @details="$emit('details',$event)" @primary="$emit('primary',$event)" @menu="context"/></div></section>
+      <section v-if="recent.length" class="group recent" aria-label="最近使用"><h2 class="group-title">最近使用 <button class="group-control" @click="$emit('preference',{kind:'recent',enabled:false})" aria-label="关闭最近使用组">×</button></h2><div class="group-grid"><AppTile v-for="app in recent" :key="app.installation_id" :app="app" :snapshot="snapshot" :feedback="feedback.get(app.installation_id)" @dismiss="$emit('dismiss',$event)" @feedback-action="(id,item)=>$emit('feedbackAction',id,item)" @details="$emit('details',$event)" @primary="$emit('primary',$event)" @menu="context"/></div></section>
       <section v-for="group in groups" :key="group.key" class="group" :aria-label="group.name" @dragover.prevent @drop.prevent="drop($event,group.key)">
-        <h2 class="group-title" :title="group.key">{{ group.name }} <span class="group-tools"><button class="group-control" aria-label="折叠或展开分组" @click="$emit('preference',{kind:'collapse',key:group.key,collapsed:!preferences.collapsed.includes(group.key)})">{{ preferences.collapsed.includes(group.key)?'▸':'▾' }}</button><button class="group-control" aria-label="启动分组" @click="$emit('batch','start',group.apps.map(a=>a.installation_id))">▷</button><button class="group-control" aria-label="停止分组" @click="$emit('batch','stop',group.apps.map(a=>a.installation_id))">□</button></span></h2>
+        <h2 class="group-title" :title="group.key">{{ group.name }} <span class="group-tools"><button class="group-control" aria-label="折叠或展开分组" @click="$emit('preference',{kind:'collapse',key:group.key,collapsed:!preferences.collapsed.includes(group.key)})">{{ preferences.collapsed.includes(group.key)?'▸':'▾' }}</button><button class="group-control" aria-label="启动分组" :disabled="runtimeBlocked(snapshot)" @click="$emit('batch','start',group.apps.map(a=>a.installation_id))">▷</button><button class="group-control" aria-label="停止分组" :disabled="runtimeBlocked(snapshot)" @click="$emit('batch','stop',group.apps.map(a=>a.installation_id))">□</button></span></h2>
         <button v-if="preferences.collapsed.includes(group.key)" class="folder-tile" :aria-label="`展开 ${group.name}，${group.apps.length} 个应用`" @click="$emit('preference',{kind:'collapse',key:group.key,collapsed:false})"><span class="folder-grid"><i v-for="app in group.apps.slice(0,9)" :key="app.installation_id" :data-state="snapshot.live ? app.runtime?.status.state : undefined" :title="app.label"/></span><span>{{ group.name }}</span></button>
-        <div v-else class="group-grid"><AppTile v-for="app in group.apps" :key="app.installation_id" :app="app" :snapshot="snapshot" :feedback="feedback.get(app.installation_id)" @dismiss="$emit('dismiss',$event)" @details="$emit('details', $event)" @primary="$emit('primary', $event)" @menu="context"/></div>
+        <div v-else class="group-grid"><AppTile v-for="app in group.apps" :key="app.installation_id" :app="app" :snapshot="snapshot" :feedback="feedback.get(app.installation_id)" @dismiss="$emit('dismiss',$event)" @feedback-action="(id,item)=>$emit('feedbackAction',id,item)" @details="$emit('details', $event)" @primary="$emit('primary', $event)" @menu="context"/></div>
       </section>
       <button class="group-add" @click="$emit('manage')">管理分组</button>
     </div>
     <Teleport to="body"><div v-if="menu" ref="menuElement" class="tile-menu" role="menu" :style="{left:Math.max(8,menu.x)+'px',top:Math.max(8,menu.y)+'px'}" @click.stop @keydown="menuKeys" @keydown.esc.stop="escapeMenu">
-      <button v-for="(title,action) in {primary:'启动 / 打开',stop:'停止',restart:'重启',details:'详情',logs:'日志',manifest:'编辑声明'}" :key="action" role="menuitem" @click="command(action as SearchAction)">{{ title }}</button>
+      <button v-for="(title,action) in {primary:'启动 / 打开',stop:'停止',restart:'重启',details:'详情',logs:'日志',manifest:'编辑声明'}" :key="action" :disabled="runtimeBlocked(snapshot) && ['stop','restart'].includes(action)" role="menuitem" @click="command(action as SearchAction)">{{ title }}</button>
       <label>移到分组<select aria-label="移到分组" value="__choose" @change="move(($event.target as HTMLSelectElement).value)"><option value="__choose" disabled>选择分组</option><option value="">默认父目录分组</option><option v-for="group in preferences.groups" :key="group.id" :value="group.id">{{ group.name }}</option></select></label>
     </div></Teleport>
   </div>

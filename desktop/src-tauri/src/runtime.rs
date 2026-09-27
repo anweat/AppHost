@@ -2,6 +2,7 @@ use apphost::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
+    collections::HashSet,
     path::PathBuf,
     sync::{
         Arc, Mutex,
@@ -15,7 +16,7 @@ use uuid::Uuid;
 pub struct Bridge {
     pub(crate) connecting: Arc<Mutex<()>>,
     generation: Arc<AtomicU64>,
-    condition: Arc<Mutex<Option<Uuid>>>,
+    condition: Arc<Mutex<HashSet<Uuid>>>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -133,6 +134,11 @@ pub async fn desktop_action(
                 }
             }
         };
+        // Stop All is available only from a live observation. A stale click must
+        // never bootstrap an absent daemon merely to persist the wake pause.
+        if method == "stop-all" {
+            return apphost::daemon::call(&data, method, params, false);
+        }
         explicit_call(&data, method, params, &lock)
     })
     .await
@@ -243,20 +249,28 @@ pub async fn desktop_condition_watch(
     channel: Channel<Value>,
 ) -> Result<()> {
     let active = state.condition.clone();
-    *active.lock().unwrap_or_else(|e| e.into_inner()) = Some(token);
+    {
+        let mut tokens = active.lock().unwrap_or_else(|e| e.into_inner());
+        if tokens.len() >= 32 {
+            return Err(Error::new("BUSY", "Too many condition observations"));
+        }
+        tokens.insert(token);
+    }
     tauri::async_runtime::spawn_blocking(move || {
         // One observation per second, bounded to 60 seconds by the core. Closing
         // or replacing a panel closes this stream at the next observation.
-        apphost::daemon::watch_condition(
+        let result = (|| apphost::daemon::watch_condition(
             &apphost::paths::data_dir(None)?,
             json!({"installation_id":installation_id,"failure_id":failure_id,"duration_secs":60}),
             |event| {
-                if *active.lock().unwrap_or_else(|e| e.into_inner()) != Some(token) {
+                if !active.lock().unwrap_or_else(|e| e.into_inner()).contains(&token) {
                     return Ok(false);
                 }
                 Ok(channel.send(event).is_ok())
             },
-        )
+        ))();
+        active.lock().unwrap_or_else(|e| e.into_inner()).remove(&token);
+        result
     })
     .await
     .map_err(join_error)?
@@ -264,9 +278,7 @@ pub async fn desktop_condition_watch(
 #[tauri::command]
 pub fn desktop_condition_unwatch(state: State<'_, Bridge>, token: Uuid) {
     let mut active = state.condition.lock().unwrap_or_else(|e| e.into_inner());
-    if *active == Some(token) {
-        *active = None;
-    }
+    active.remove(&token);
 }
 #[cfg(test)]
 mod tests {

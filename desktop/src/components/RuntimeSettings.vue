@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { errorMessage } from '../model';
+const emit=defineEmits<{saved:[]}>();
 const enabled = ref<boolean>(), loginChoice = ref(''), port = ref(18480), busy = ref(''), message = ref(''), loginError = ref('');
 onMounted(async () => {
   await Promise.allSettled([
@@ -13,7 +14,7 @@ async function save(kind:'login'|'gateway') {
   if (busy.value || (kind === 'login' && !loginChoice.value)) return;
   busy.value=kind; message.value='';
   try {
-    if (kind === 'login') {const value=await invoke<{enabled:boolean}>('desktop_login_save',{enabled:loginChoice.value === 'on'}); enabled.value=value.enabled; message.value='已保存，下次登录生效；不会自动启动应用。';}
+    if (kind === 'login') {const value=await invoke<{enabled:boolean}>('desktop_login_save',{enabled:loginChoice.value === 'on'}); enabled.value=value.enabled; emit('saved'); message.value='已保存，下次登录生效；不会自动启动应用。';}
     else {await invoke('desktop_gateway_save',{port:port.value}); message.value='网关端口已保存，现有书签需要使用新端口。';}
   } catch(e) {message.value=`${errorMessage(e).code} · ${errorMessage(e).message}`;}
   finally {busy.value='';}

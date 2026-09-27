@@ -23,6 +23,19 @@ describe('desktop compound interactions',()=>{
     expect(letter.defaultPrevented).toBe(true);
     expect((panel.find('input[type=search]').element as HTMLInputElement).value).toBe('n');panel.unmount();
   });
+  it('focuses search for the macOS IME first key without appending Latin text or canceling composition',async()=>{
+    const panel=shallowMount(App,{attachTo:document.body});await flushPromises();
+    const firstKey=new KeyboardEvent('keydown',{key:'n',keyCode:229,bubbles:true,cancelable:true});
+    panel.find('.brand').element.dispatchEvent(firstKey);await flushPromises();
+    const field=panel.find('input[type=search]');
+    expect(firstKey.defaultPrevented).toBe(false);expect((field.element as HTMLInputElement).value).toBe('');expect(document.activeElement).toBe(field.element);
+    await field.trigger('compositionstart');await field.setValue('停止 Notes');await field.trigger('keydown',{key:'Enter',isComposing:true,keyCode:229});expect(invoke.mock.calls.some(c=>c[0]==='desktop_action')).toBe(false);await field.setValue('你好');await field.trigger('compositionend',{data:'你好'});
+    expect((field.element as HTMLInputElement).value).toBe('你好');panel.unmount();
+  });
+  it('disables Stop All when the library only contains stopped registrations',async()=>{
+    const panel=shallowMount(App);await flushPromises();expect(panel.find('button.stop-all').attributes('disabled')).toBeDefined();
+    await panel.find('button.stop-all').trigger('click');expect(invoke.mock.calls.some(c=>c[0]==='desktop_action')).toBe(false);panel.unmount();
+  });
   it('Stop All cancels not-yet-dispatched members of a group launch',async()=>{
     let release!:(value:unknown)=>void;
     invoke.mockImplementation(async(cmd:string,params:any)=>{

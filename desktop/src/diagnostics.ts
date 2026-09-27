@@ -1,6 +1,6 @@
 export interface AdviceAction { id: string; title: string; primary: boolean; argv: string[]; cwd?: string; copy_only?: boolean }
 export interface FailureReport {
-  failure: null | { failure_id: string; at_ms: number; service: string | null; phase: string; collecting: boolean; gaps: string[]; stderr_tail: string; details?: FailureDetails };
+  failure: null | { failure_id: string; instance_id?:string|null; at_ms: number; service: string | null; phase: string; collecting: boolean; gaps: string[]; stderr_tail: string; details?: FailureDetails };
   details_expired: boolean;
   records?: {failure_id:string;at_ms:number;code:string}[];
   changes_since_success?: {available:boolean;reason?:string;changes?:{field:string;before:unknown;after:unknown}[]};

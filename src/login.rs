@@ -95,12 +95,35 @@ mod macos {
             Err(e) => Err(e),
         }
     }
+    // This marker records an explicit choice, not a second copy of login state.
+    // An existing AppHost LaunchAgent also proves a prior explicit opt-in.
+    fn choice_made(data: &Path) -> Result<bool> {
+        match storage::read(&data.join("login-choice.json")) {
+            Ok(bytes) => {
+                let value: Value = serde_json::from_slice(&bytes).map_err(|_| {
+                    Error::new("LOGIN_CONFIG_CONFLICT", "Invalid login choice marker")
+                })?;
+                if value != json!({"schema_version":1}) {
+                    return Err(Error::new(
+                        "LOGIN_CONFIG_CONFLICT",
+                        "Invalid login choice marker",
+                    ));
+                }
+                Ok(true)
+            }
+            Err(e) if e.code == "NOT_FOUND" => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
     pub(super) fn show(data: &Path, home: &Path) -> Result<Value> {
         if !data.try_exists().map_err(|e| storage::io_error(data, e))? {
-            return Ok(json!({"enabled":false,"activation":"next_login"}));
+            return Ok(json!({"enabled":false,"choice_made":false,"activation":"next_login"}));
         }
         let (label, path) = target(data, home)?;
-        Ok(json!({"enabled":existing(&path)?,"label":label,"path":path,"activation":"next_login"}))
+        let enabled = existing(&path)?;
+        Ok(
+            json!({"enabled":enabled,"choice_made":choice_made(data)? || enabled,"label":label,"path":path,"activation":"next_login"}),
+        )
     }
     fn escape(value: &str) -> Result<String> {
         if value.chars().any(char::is_control) {
@@ -153,6 +176,7 @@ mod macos {
             .map_err(|_| Error::new("BUSY", "Login settings are being changed"))?;
         let (label, path) = target(&data, home)?;
         let exists = existing(&path)?;
+        choice_made(&data)?; // Reject malformed existing metadata before changing the OS setting.
         if enabled {
             let executable =
                 fs::canonicalize(executable).map_err(|e| storage::io_error(executable, e))?;
@@ -171,6 +195,11 @@ mod macos {
                 .and_then(|f| f.sync_all())
                 .map_err(|e| storage::io_error(&path, e))?;
         }
+        storage::publish(
+            &data.join("login-choice.json"),
+            br#"{"schema_version":1}"#,
+            true,
+        )?;
         // No bootstrap/bootout: changes apply at the next login. In particular,
         // disabling the setting must leave a currently running daemon and Apps alone.
         show(&data, home)
@@ -178,6 +207,22 @@ mod macos {
     #[cfg(test)]
     mod tests {
         use super::*;
+        #[test]
+        fn explicit_off_is_remembered_and_failed_choice_is_not() {
+            let t = tempfile::tempdir().unwrap();
+            let data = t.path().join("data");
+            let home = t.path().join("home");
+            let missing = t.path().join("missing-executable");
+            assert_eq!(show(&data, &home).unwrap()["choice_made"], false);
+            assert!(!data.exists());
+            assert!(set(&data, &home, &missing, true).is_err());
+            assert_eq!(show(&data, &home).unwrap()["choice_made"], false);
+            let result = set(&data, &home, &missing, false).unwrap();
+            assert_eq!(result["choice_made"], true);
+            assert_eq!(result["enabled"], false);
+            assert_eq!(show(&data, &home).unwrap()["choice_made"], true);
+            assert!(!home.exists());
+        }
         #[test]
         fn opt_in_is_scoped_read_only_and_preserves_unrelated_agents() {
             let t = tempfile::tempdir().unwrap();

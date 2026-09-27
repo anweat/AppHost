@@ -39,3 +39,13 @@ export function errorMessage(error: unknown): CoreError {
     return { code: String(error.code), message: String(error.message) };
   return { code: 'DESKTOP_READ_FAILED', message: String(error) };
 }
+
+// A confirmed absent daemon may be bootstrapped; transport/auth errors are not absence.
+export function runtimeBlocked(snapshot: Snapshot | null) {
+  return !snapshot || (!!snapshot.runtime_error && snapshot.runtime_error.code !== 'DAEMON_UNAVAILABLE');
+}
+export function hasStoppableApps(snapshot: Snapshot | null) {
+  return !!snapshot?.live && snapshot.apps.some(app => app.runtime && (
+    ['STARTING', 'STOPPING'].includes(app.runtime.status.state) || app.runtime.management_uncertain || app.runtime.services.some(s => s.alive)
+  ));
+}

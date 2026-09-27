@@ -2,7 +2,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { mount } from '@vue/test-utils';
 import AppTile from './components/AppTile.vue';
-import { hasLiveServices, stateLabel, type AppEntry, type Snapshot } from './model';
+import { runtimeBlocked, hasLiveServices, stateLabel, type AppEntry, type Snapshot } from './model';
 import { useSnapshot } from './useSnapshot';
 const app: AppEntry = {
   installation_id: 'installation', project_id: 'project', label: '<img src=x onerror=alert(1)>',
@@ -23,6 +23,12 @@ describe('desktop observations', () => {
     expect(view.displayed.value?.read_at_ms).toBe(13);
     expect(view.displayed.value?.live).toBe(false);
     expect(view.displayed.value?.runtime_error?.code).toBe('DAEMON_UNAVAILABLE');
+  });
+  it('preserves a subscription error until reconnect or a confirmed absent-daemon read',async()=>{
+    const read=vi.fn().mockResolvedValue(snapshot),view=useSnapshot(read);await view.refresh();
+    view.offline({code:'SOCKET_UNSAFE',message:'unsafe'});await view.refresh();
+    expect(view.displayed.value?.live).toBe(false);expect(runtimeBlocked(view.displayed.value)).toBe(true);
+    read.mockResolvedValue({...snapshot,live:false});await view.refresh();expect(runtimeBlocked(view.displayed.value)).toBe(false);
   });
   it('coalesces refresh clicks so a stale response cannot replace a newer one', async () => {
     let resolve!: (value: Snapshot) => void;

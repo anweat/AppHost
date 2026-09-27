@@ -12,15 +12,27 @@ function ready(value: Snapshot): Snapshot {
   return { ...value, apps: value.apps.map(app => ({ ...app, runtime: { ...receipt, updated_at_ms:2, status:{state:'RUNNING' as const,failure:null}, services:[{name:'web',port:3000,alive:true,ready:true}], operation_done:true } })) };
 }
 describe('explicit desktop runtime intent', () => {
-  it.each(['start', 'restart', 'stop-all'] as const)('dispatches offline %s once and reconnects observations', async kind => {
+  it.each(['start', 'restart'] as const)('dispatches offline %s once and reconnects observations', async kind => {
     invoke.mockReset().mockResolvedValue(receipt);
     const value = ref({...snapshot(),live:false}), scope = effectScope(), connected = vi.fn();
     const runtime = scope.run(() => useRuntime(value, async () => {}, vi.fn(), connected, vi.fn()))!;
-    await runtime.action(kind, kind === 'stop-all' ? undefined : 'app');
+    await runtime.action(kind, 'app');
     expect(invoke.mock.calls.filter(c => c[0] === 'desktop_action')).toHaveLength(1);
     expect(connected).toHaveBeenCalledOnce(); scope.stop();
   });
 
+  it.each(['absent','empty','transport-error'] as const)('does not dispatch Stop All for %s',async mode=>{
+    invoke.mockReset();
+    const state=mode==='transport-error'?{...ready(snapshot()),live:false,runtime_error:{code:'PERMISSION_DENIED',message:'denied'}}:mode==='absent'?{...ready(snapshot()),live:false}:snapshot();
+    const scope=effectScope(), value=ref(state);
+    const runtime=scope.run(()=>useRuntime(value,async()=>{},vi.fn(),vi.fn(),vi.fn()))!;
+    expect(runtime.canStopAll.value).toBe(false);await runtime.action('stop-all');expect(invoke).not.toHaveBeenCalled();runtime.dispose();scope.stop();
+  });
+  it('blocks explicit actions on transport errors, without treating stale running state as current',async()=>{
+    invoke.mockReset();const value=ref({...ready(snapshot()),live:false,runtime_error:{code:'SOCKET_UNSAFE',message:'unsafe'}}),scope=effectScope();
+    const runtime=scope.run(()=>useRuntime(value,async()=>{},vi.fn(),vi.fn(),vi.fn()))!;
+    await runtime.action('start','app');await runtime.action('restart','app');expect(invoke).not.toHaveBeenCalled();runtime.dispose();scope.stop();
+  });
   it('opens once for the matching ready instance, never for repeated snapshots', async () => {
     invoke.mockReset().mockImplementation(async (command: string) => command === 'desktop_action' ? receipt : undefined);
     const value = ref(snapshot()), scope = effectScope();
@@ -30,6 +42,12 @@ describe('explicit desktop runtime intent', () => {
     expect(invoke.mock.calls.filter(call => call[0] === 'desktop_open')).toHaveLength(1);
     expect(invoke).toHaveBeenCalledWith('desktop_open', { installationId:'app',instanceId:'instance',operationId:'operation' });
     scope.stop();
+  });
+  it('keeps group launch results in activity without spawning single-app bubbles',async()=>{
+    invoke.mockReset().mockResolvedValue(receipt);const value=ref(snapshot()),scope=effectScope();
+    const runtime=scope.run(()=>useRuntime(value,async()=>{value.value=ready(value.value);},vi.fn(),vi.fn(),vi.fn()))!;
+    await runtime.action('start','app',undefined,true);await nextTick();
+    expect(runtime.activities.value.get('app')?.text).toBe('已就绪');expect(runtime.feedback.value.size).toBe(0);runtime.dispose();scope.stop();
   });
   it('Stop All cancels a start intent whose acknowledgement arrives late', async () => {
     let resolve!: (value: typeof receipt) => void;
@@ -49,7 +67,7 @@ describe('explicit desktop runtime intent', () => {
     const value = ref(snapshot()), scope = effectScope();
     const runtime = scope.run(() => useRuntime(value, async () => {}, vi.fn(), vi.fn(), vi.fn()))!;
     await runtime.action('start', 'app');
-    expect(invoke).toHaveBeenCalledTimes(1); expect(runtime.message.value).toContain('RPC_TIMEOUT');
+    expect(invoke.mock.calls.filter(c=>c[0]==='desktop_action')).toHaveLength(1); expect(runtime.message.value).toContain('RPC_TIMEOUT');
     scope.stop();
   });
   it.each(['replaced', 'offline', 'closed'])('does not open a stale browser intent after %s', async reason => {

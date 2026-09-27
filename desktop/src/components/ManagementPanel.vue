@@ -29,7 +29,7 @@ watch(section, value => visited.add(value), {immediate:true});
     <div class="manage-content">
       <ApplicationSettings v-if="visited.has('applications')" v-show="section === 'applications'" v-model:installation-id="installationId" :apps="apps" @changed="$emit('changed')" @review="$emit('review', $event)"/>
       <JournalPanel v-if="section === 'journal'" :apps="apps"/>
-      <RuntimeSettings v-if="visited.has('runtime')" v-show="section === 'runtime'"/>
+      <RuntimeSettings @saved="$emit('changed')" v-if="visited.has('runtime')" v-show="section === 'runtime'"/>
       <GroupSettings v-if="section === 'groups'" :preferences="preferences" :busy="saving" @change="$emit('preference',$event)"/>
       <SearchSettings v-if="section === 'search'" :preferences="preferences" :busy="saving" @change="$emit('preference',$event)"/>
       <AppearanceSettings v-show="section === 'appearance'" :theme="theme" :saving="saving" @theme="$emit('theme', $event)"/>

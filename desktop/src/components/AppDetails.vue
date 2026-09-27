@@ -7,7 +7,7 @@ import LogsPanel from './LogsPanel.vue';
 import TerminalPanel from './TerminalPanel.vue';
 import FailurePanel from './FailurePanel.vue';
 import type { Action } from '../useRuntime';
-import { stateLabel, type AppEntry, type Snapshot } from '../model';
+import { runtimeBlocked, stateLabel, type AppEntry, type Snapshot } from '../model';
 defineProps<{ app: AppEntry; snapshot: Snapshot; busy?: boolean }>();
 defineEmits<{ close: []; action: [action: Action]; changed: []; environment: []; relink: []; owner: [failureId: string]; dirty: [value: boolean] }>();
 const tab = defineModel<string>('tab', { default:'overview' });
@@ -22,13 +22,13 @@ watch(tab, value => { if (value === 'manifest') editorOpened.value = true; }, {i
     <div v-if="tab === 'overview'" class="detail-body">
       <p>{{ stateLabel(app, snapshot) }}</p>
       <div class="row-actions">
-        <button :class="{primary:app.runtime?.status.state !== 'FAILED'}" :disabled="busy || app.requires_confirmation || app.registration_state === 'SOURCE_MISSING' || (snapshot.live && ['STARTING','STOPPING','RUNNING'].includes(app.runtime?.status.state || ''))" @click="$emit('action', app.runtime?.services.some(service => service.alive) ? 'restart' : 'start')"><AppIcon name="play"/>{{ app.runtime?.services.some(service => service.alive) ? '完整重启' : '启动' }}</button>
-        <button :disabled="busy || !app.runtime || app.runtime.status.state === 'STOPPED'" @click="$emit('action', 'stop')"><AppIcon name="stop"/>停止</button>
-        <button v-if="app.runtime?.status.state === 'RUNNING'" :disabled="busy || app.requires_confirmation" @click="$emit('action', 'restart')"><AppIcon name="refresh"/>重启</button>
+        <button :class="{primary:app.runtime?.status.state !== 'FAILED'}" :disabled="runtimeBlocked(snapshot) || busy || app.requires_confirmation || app.registration_state === 'SOURCE_MISSING' || (snapshot.live && ['STARTING','STOPPING','RUNNING'].includes(app.runtime?.status.state || ''))" @click="$emit('action', app.runtime?.services.some(service => service.alive) ? 'restart' : 'start')"><AppIcon name="play"/>{{ app.runtime?.services.some(service => service.alive) ? '完整重启' : '启动' }}</button>
+        <button :disabled="runtimeBlocked(snapshot) || busy || !app.runtime || app.runtime.status.state === 'STOPPED'" @click="$emit('action', 'stop')"><AppIcon name="stop"/>停止</button>
+        <button v-if="app.runtime?.status.state === 'RUNNING'" :disabled="runtimeBlocked(snapshot) || busy || app.requires_confirmation" @click="$emit('action', 'restart')"><AppIcon name="refresh"/>重启</button>
       </div>
       <p v-if="app.registration_state === 'SOURCE_MISSING'" class="notice">源码目录不可用 <button @click="$emit('relink')">重新关联路径</button></p>
       <p v-else-if="app.requires_confirmation" class="notice">启动声明需要重新确认 <button @click="tab = 'manifest'">复核声明</button></p>
-      <FailurePanel v-if="app.runtime?.status.state === 'FAILED'" :key="app.runtime.operation_id" :installation-id="app.installation_id" :apps="snapshot.apps" :can-retry="!busy && !app.requires_confirmation && app.registration_state !== 'SOURCE_MISSING'" @retry="$emit('action', 'restart')" @edit="edit" @environment="$emit('environment')" @relink="$emit('relink')" @owner="$emit('owner', $event)"/>
+      <FailurePanel v-if="app.runtime?.status.state === 'FAILED'" :key="app.runtime.operation_id" :installation-id="app.installation_id" :apps="snapshot.apps" :can-retry="!runtimeBlocked(snapshot) && !busy && !app.requires_confirmation && app.registration_state !== 'SOURCE_MISSING'" @retry="$emit('action', 'restart')" @edit="edit" @environment="$emit('environment')" @relink="$emit('relink')" @owner="$emit('owner', $event)"/>
       <dl><dt>项目目录</dt><dd>{{ app.path }}</dd><dt>安装 ID</dt><dd>{{ app.installation_id }}</dd></dl>
       <template v-if="app.runtime">
         <p v-if="app.runtime.status.failure" class="notice">{{ app.runtime.status.failure }}</p>
@@ -43,7 +43,7 @@ watch(tab, value => { if (value === 'manifest') editorOpened.value = true; }, {i
     <div v-else-if="tab !== 'manifest'" class="detail-body">
       <template v-if="tab === 'logs'"><LogsPanel v-if="app.runtime" :key="app.runtime.instance_id" :installation-id="app.installation_id" :instance-id="app.runtime.instance_id" :live="snapshot.live"/><p v-else class="muted">尚无运行实例，启动后可查看日志。</p></template>
       <TerminalPanel v-else-if="tab === 'terminal'" :installation-id="app.installation_id" :path="app.path" :missing="app.registration_state === 'SOURCE_MISSING'"/>
-      <FailurePanel v-else :installation-id="app.installation_id" :apps="snapshot.apps" :can-retry="!busy && !app.requires_confirmation && app.registration_state !== 'SOURCE_MISSING' && !(snapshot.live && ['STARTING','STOPPING','RUNNING'].includes(app.runtime?.status.state || ''))" @retry="$emit('action', 'restart')" @edit="edit" @environment="$emit('environment')" @relink="$emit('relink')" @owner="$emit('owner', $event)"/>
+      <FailurePanel v-else :installation-id="app.installation_id" :apps="snapshot.apps" :can-retry="!runtimeBlocked(snapshot) && !busy && !app.requires_confirmation && app.registration_state !== 'SOURCE_MISSING' && !(snapshot.live && ['STARTING','STOPPING','RUNNING'].includes(app.runtime?.status.state || ''))" @retry="$emit('action', 'restart')" @edit="edit" @environment="$emit('environment')" @relink="$emit('relink')" @owner="$emit('owner', $event)"/>
     </div>
     <div v-if="editorOpened" v-show="tab === 'manifest'" class="detail-body"><ManifestEditor :focus="editFocus" :app="app" :live="snapshot.live" @changed="$emit('changed')" @dirty="$emit('dirty', $event)"/></div>
   </aside>
