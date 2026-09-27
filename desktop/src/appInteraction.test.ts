@@ -36,6 +36,28 @@ describe('desktop compound interactions',()=>{
     const panel=shallowMount(App);await flushPromises();expect(panel.find('button.stop-all').attributes('disabled')).toBeDefined();
     await panel.find('button.stop-all').trigger('click');expect(invoke.mock.calls.some(c=>c[0]==='desktop_action')).toBe(false);panel.unmount();
   });
+  it('retains every skipped group member in activity without issuing starts',async()=>{
+    invoke.mockImplementation(async cmd=>{if(cmd==='desktop_snapshot')return {...snapshot,apps:snapshot.apps.map(a=>({...a,requires_confirmation:true}))};if(cmd==='desktop_preferences')return defaults();if(cmd==='desktop_watch')return new Promise(()=>{});});
+    const panel=shallowMount(App);await flushPromises();panel.findComponent(TileBoard).vm.$emit('batch','start',['a','b']);await flushPromises();
+    const activity=panel.find('.activity-panel');expect(activity.text()).toContain('Notes · 已跳过');expect(activity.text()).toContain('Server · 已跳过');
+    expect(invoke.mock.calls.some(c=>c[0]==='desktop_action')).toBe(false);panel.unmount();
+  });
+  it('queues a layout change behind a recent-use write instead of silently dropping it',async()=>{
+    let release!:(value:unknown)=>void;
+    invoke.mockImplementation(async(cmd,params)=>{if(cmd==='desktop_snapshot')return snapshot;if(cmd==='desktop_preferences')return defaults();if(cmd==='desktop_watch')return new Promise(()=>{});if(cmd==='desktop_ui_edit'){if(params.change.kind==='touch')return new Promise(r=>{release=r;});return defaults();}if(cmd==='desktop_action')return {results:[]};});
+    const panel=shallowMount(App);await flushPromises();const board=panel.findComponent(TileBoard);
+    board.vm.$emit('primary','a');await flushPromises();board.vm.$emit('preference',{kind:'recent',enabled:false});await flushPromises();
+    expect(invoke.mock.calls.filter(c=>c[0]==='desktop_ui_edit')).toHaveLength(1);
+    release(defaults());await flushPromises();expect(invoke.mock.calls.filter(c=>c[0]==='desktop_ui_edit').map(c=>c[1].change.kind)).toEqual(['touch','recent']);panel.unmount();
+  });
+  it('prunes old UI references after an installation disappears from the observed registry',async()=>{
+    let apps=snapshot.apps;
+    const prefs={...defaults(),groups:[{id:'g',name:'Study',members:['a','b']}],last_used:{a:1,b:2}};
+    invoke.mockImplementation(async cmd=>{if(cmd==='desktop_snapshot')return {...snapshot,apps};if(cmd==='desktop_preferences')return prefs;if(cmd==='desktop_ui_edit')return {...prefs,groups:[{...prefs.groups[0]!,members:['a']}],last_used:{a:1}};if(cmd==='desktop_watch')return new Promise(()=>{});});
+    const panel=shallowMount(App);await flushPromises();expect(invoke.mock.calls.some(c=>c[0]==='desktop_ui_edit')).toBe(false);
+    apps=[snapshot.apps[0]!];await panel.find('[aria-label="刷新应用与状态"]').trigger('click');await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('desktop_ui_edit',{change:{kind:'prune'}});panel.unmount();
+  });
   it('Stop All cancels not-yet-dispatched members of a group launch',async()=>{
     let release!:(value:unknown)=>void;
     invoke.mockImplementation(async(cmd:string,params:any)=>{

@@ -1,13 +1,33 @@
 import { ref } from 'vue';
 import { Channel, invoke } from '@tauri-apps/api/core';
-import type { FailureReport } from './diagnostics';
-import type { Snapshot } from './model';
+import type { AdviceAction, FailureReport } from './diagnostics';
+import type { CoreError, Snapshot } from './model';
 
 export interface Feedback {
   text: string;
   persistent: boolean;
   report?: FailureReport;
   cleared?: boolean;
+  error?: CoreError;
+  impact?: string;
+  primary?: AdviceAction;
+  since?: number;
+}
+export function feedbackPrimary(item:Feedback) { return item.report?.advice?.actions.find(a=>a.primary) || item.primary; }
+function controlFeedback(error:CoreError, since:number):Feedback {
+  const operation:Record<string,[string,string]>={
+    REVIEW_REQUIRED:['review_manifest','复核启动声明'],
+    STALE_LAUNCH:['refresh_status','刷新应用状态'],
+    RESTART_REQUIRED:['retry','完整重新启动'],
+    BUSY:['refresh_status','刷新应用状态'],
+    RUNTIME_LIMIT:['view_activity','查看活动实例'],
+    BACKEND_MISSING:['inspect_daemon','检查后台连接'],
+  };
+  const [id,title]=operation[error.code] || ['inspect_daemon','检查后台连接'];
+  return {text:error.message || error.code,error,persistent:true,since,
+    impact:'本次操作未确认完成；现有应用状态以最新观察为准。',
+    primary:{id:id!,title:title!,primary:true,argv:[]}};
+
 }
 // Only explicit single-app operations create bubbles. Tokens bind late reads and
 // condition events to the displayed result, so dismissal/retry cannot revive it.
@@ -26,10 +46,10 @@ export function useFeedback() {
     dismiss(id); feedback.value.set(id,{text,persistent:false});
     timers.set(id,setTimeout(()=>dismiss(id),8000));
   }
-  async function failure(id:string, since:number, instance?:string) {
+  async function failure(id:string, since:number, instance?:string, error?:CoreError) {
     dismiss(id);
     const token=crypto.randomUUID(); tokens.set(id,token);
-    feedback.value.set(id,{text:'操作未能完成，请查看失败详情',persistent:true});
+    feedback.value.set(id,controlFeedback(error || {code:'OPERATION_FAILED',message:'本次操作未能完成，失败原因暂不可用'},since));
     try {
       let report:FailureReport|undefined;
       // State notifications can precede publication of the failure file. Retry
@@ -55,14 +75,22 @@ export function useFeedback() {
       conditions.set(id,token);
       try { await invoke('desktop_condition_watch',{installationId:id,failureId:report.failure.failure_id,token,channel}); }
       finally { if(conditions.get(id)===token) conditions.delete(id); }
-    } catch { /* Evidence/watch unavailable: retain the failure and its details entry. */ }
+    } catch { /* Keep this operation's error; no unrelated history link is offered. */ }
   }
   function resolved(snapshot:Snapshot|null) {
-    if(!snapshot?.live) return;
+    if(!snapshot) return;
     for(const [id,item] of feedback.value) {
-      if(!item.persistent || !item.report) continue;
+      if(!item.persistent) continue;
       const app=snapshot.apps.find(a=>a.installation_id===id);
-      if(!app || (app.runtime && !app.runtime.operation_error && ['RUNNING','STOPPED'].includes(app.runtime.status.state))) dismiss(id);
+      if(!app) {dismiss(id);continue;}
+      if(!item.report) {
+        // Clear only evidence we can observe, never an unrelated old success.
+        const code=item.error?.code;
+        if((snapshot.read_at_ms >= (item.since || 0) && code==='REVIEW_REQUIRED' && !app.requires_confirmation) ||
+          (snapshot.read_at_ms >= (item.since || 0) && code==='SOURCE_MISSING' && app.registration_state!=='SOURCE_MISSING') ||
+          (['BACKEND_MISSING','DAEMON_UNAVAILABLE','DAEMON_START_TIMEOUT'].includes(code||'') && snapshot.live && snapshot.read_at_ms >= (item.since || 0) && !snapshot.runtime_error) ||
+          (snapshot.live && app.runtime && app.runtime.updated_at_ms >= (item.since||Infinity) && !app.runtime.operation_error && ['RUNNING','STOPPED'].includes(app.runtime.status.state))) dismiss(id);
+      } else if(snapshot.live && app.runtime && !app.runtime.operation_error && ['RUNNING','STOPPED'].includes(app.runtime.status.state)) dismiss(id);
     }
   }
   function dispose(){ for(const id of [...feedback.value.keys()]) dismiss(id); }

@@ -33,6 +33,13 @@ describe('explicit desktop runtime intent', () => {
     const runtime=scope.run(()=>useRuntime(value,async()=>{},vi.fn(),vi.fn(),vi.fn()))!;
     await runtime.action('start','app');await runtime.action('restart','app');expect(invoke).not.toHaveBeenCalled();runtime.dispose();scope.stop();
   });
+  it.each(['receipt','exception'])('passes the actual %s error into persistent feedback',async source=>{
+    const error={code:'BACKEND_MISSING',message:'Bundled apphost executable is missing'};
+    invoke.mockReset().mockImplementation(async cmd=>{if(cmd==='desktop_failure')throw {code:'IO_ERROR'};if(cmd==='desktop_action'){if(source==='exception')throw error;return {installation_id:'app',error};}});
+    const scope=effectScope(),value=ref(snapshot());const runtime=scope.run(()=>useRuntime(value,async()=>{},vi.fn(),vi.fn(),vi.fn()))!;
+    await runtime.action('start','app');await nextTick();expect(runtime.feedback.value.get('app')?.error).toEqual(error);expect(runtime.feedback.value.get('app')?.text).toBe(error.message);
+    runtime.dispose();scope.stop();
+  });
   it('opens once for the matching ready instance, never for repeated snapshots', async () => {
     invoke.mockReset().mockImplementation(async (command: string) => command === 'desktop_action' ? receipt : undefined);
     const value = ref(snapshot()), scope = effectScope();

@@ -39,6 +39,11 @@ describe('fixed tile layout and menus',()=>{
     expect(panel.emitted('preference')?.[0]).toEqual([{kind:'move',installation_id:'a',group_id:'g'}]);
     expect(panel.findAll('.tile-name').map(n=>n.text())).toEqual(['Notes','API']);panel.unmount();
   });
+  it('hides empty custom groups during search and restores them afterward',async()=>{
+    const preferences={...defaults(),groups:[{id:'g',name:'Empty group',members:[]}]};
+    const panel=mount(TileBoard,{props:{apps:[apps[0]!],filtering:true,snapshot:{apps,live:true,read_at_ms:1,runtime_error:null},lens:null,preferences,feedback:new Map()}});
+    expect(panel.find('[aria-label="Empty group"]').exists()).toBe(false);await panel.setProps({filtering:false});expect(panel.find('[aria-label="Empty group"]').exists()).toBe(true);panel.unmount();
+  });
   it('recent is optional, capped at six and separate from the stable regular tiles',async()=>{
     const many=Array.from({length:12},(_,i)=>({...apps[0]!,installation_id:String(i),label:String(i)}));const p=defaults();p.last_used=Object.fromEntries(many.map((a,i)=>[a.installation_id,i+1]));
     const panel=mount(TileBoard,{props:{apps:many,snapshot:{apps:many,live:false,read_at_ms:1,runtime_error:null},lens:null,preferences:p,feedback:new Map()}});await flushPromises();

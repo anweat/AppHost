@@ -872,6 +872,16 @@ pub fn list(data_dir: &Path, include_detached: bool) -> Result<Vec<Listing>> {
         .collect()
 }
 
+/// UI reconciliation reads registration identities without scanning projects or git.
+pub(crate) fn active_ids(data_dir: &Path) -> Result<HashSet<Uuid>> {
+    Ok(load(data_dir)?
+        .installations
+        .into_iter()
+        .filter(|i| !i.detached)
+        .map(|i| i.installation_id)
+        .collect())
+}
+
 pub fn detach(data_dir: &Path, id: Uuid) -> Result<Installation> {
     update(data_dir, id, |installation| {
         installation.detached = true;

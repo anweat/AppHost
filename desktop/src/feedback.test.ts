@@ -9,6 +9,42 @@ import type { FailureReport } from './diagnostics';
 const report=(at=100):FailureReport=>({failure:{failure_id:'f',instance_id:'i',at_ms:at,service:'web',phase:'start',collecting:false,gaps:[],stderr_tail:''},details_expired:false,history:{},advice:{code:'PORT_IN_USE',title:'端口已被占用',impact:'应用未能完成启动',consecutive_same_cause:2,clears_when:'停止或重试',evidence:{inferred:false,rule_id:'port'},actions:[{id:'edit_manifest',title:'检查声明端口',primary:true,argv:[]}],hints:[]}});
 afterEach(()=>{vi.useRealTimers();});
 describe('persistent explicit failure feedback',()=>{
+  it.each(['REVIEW_REQUIRED','BUSY','STALE_LAUNCH','RESTART_REQUIRED','RUNTIME_LIMIT','BACKEND_MISSING','RPC_TIMEOUT'])('keeps %s visible without an unrelated details link when no matching record exists',async code=>{
+    vi.useFakeTimers();invoke.mockReset().mockImplementation(async cmd=>{if(cmd==='desktop_failure')return report(10);return null;});
+    const feedback=useFeedback(), error={code,message:'本次请求的具体错误原因'};
+    const reading=feedback.failure('a',90,undefined,error);
+    expect(feedback.feedback.value.get('a')?.text).toBe(error.message);
+    await vi.advanceTimersByTimeAsync(2100);await reading;
+    const item=feedback.feedback.value.get('a')!;expect(item.error).toEqual(error);expect(item.report).toBeUndefined();expect(item.impact).toContain('未确认完成');
+    const app={installation_id:'a',project_id:'p',label:'应用',path:'/app',registration_state:'REGISTERED',requires_confirmation:code==='REVIEW_REQUIRED',runtime:null};
+    const tile=mount(AppTile,{props:{app,snapshot:{apps:[app],live:false,read_at_ms:91,runtime_error:null},feedback:item}});await flushPromises();
+    expect(tile.find('.tile-feedback').text()).toContain(code);expect(tile.find('.tile-feedback').text()).toContain(error.message);
+    expect(tile.findAll('.tile-feedback button').map(b=>b.text())).not.toContain('详情');expect(tile.findAll('.tile-feedback button')).toHaveLength(2);
+    tile.unmount();feedback.dispose();
+  });
+  it('clears a control error only on fresh resolution, not a historical success',async()=>{
+    invoke.mockReset().mockRejectedValue({code:'IO_ERROR'});const feedback=useFeedback();
+    const app={installation_id:'a',project_id:'p',label:'应用',path:'/app',registration_state:'REGISTERED',requires_confirmation:true,runtime:null};
+    await feedback.failure('a',100,undefined,{code:'REVIEW_REQUIRED',message:'需要复核'});
+    feedback.resolved({apps:[{...app,requires_confirmation:false}],live:false,read_at_ms:99,runtime_error:null});expect(feedback.feedback.value.has('a')).toBe(true);
+    feedback.resolved({apps:[{...app,requires_confirmation:false}],live:false,read_at_ms:101,runtime_error:null});expect(feedback.feedback.value.has('a')).toBe(false);
+    await feedback.failure('a',100,undefined,{code:'BUSY',message:'busy'});
+    const runtime={installation_id:'a',instance_id:'i',updated_at_ms:10,status:{state:'RUNNING' as const,failure:null},services:[]};
+    feedback.resolved({apps:[{...app,runtime}],live:true,read_at_ms:101,runtime_error:null});expect(feedback.feedback.value.has('a')).toBe(true);
+    feedback.resolved({apps:[{...app,runtime:{...runtime,updated_at_ms:110}}],live:true,read_at_ms:111,runtime_error:null});expect(feedback.feedback.value.has('a')).toBe(false);feedback.dispose();
+  });
+  it('retains the original bootstrap error after all evidence reads return NOT_FOUND',async()=>{
+    vi.useFakeTimers();invoke.mockReset().mockRejectedValue({code:'NOT_FOUND',message:'No failure record'});
+    const feedback=useFeedback(),error={code:'BACKEND_MISSING',message:'Bundled apphost executable is missing'};
+    const reading=feedback.failure('a',100,undefined,error);
+    await vi.advanceTimersByTimeAsync(2100);await reading;
+    expect(invoke.mock.calls.filter(c=>c[0]==='desktop_failure')).toHaveLength(5);
+    expect(feedback.feedback.value.get('a')).toMatchObject({error,text:error.message,persistent:true});
+    expect(feedback.feedback.value.get('a')?.report).toBeUndefined();
+    const app={installation_id:'a',project_id:'p',label:'应用',path:'/app',registration_state:'REGISTERED',requires_confirmation:false,runtime:null};
+    feedback.resolved({apps:[app],live:true,read_at_ms:99,runtime_error:null});expect(feedback.feedback.value.has('a')).toBe(true);
+    feedback.resolved({apps:[app],live:true,read_at_ms:101,runtime_error:null});expect(feedback.feedback.value.has('a')).toBe(false);feedback.dispose();
+  });
   it('expires successes but retains core failure advice and offers retry only after port release',async()=>{
     vi.useFakeTimers();let channel:any;
     invoke.mockReset().mockImplementation(async(cmd:string,args:any)=>{if(cmd==='desktop_failure')return report();if(cmd==='desktop_condition_watch')channel=args.channel;});

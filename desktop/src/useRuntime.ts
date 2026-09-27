@@ -71,7 +71,7 @@ export function useRuntime(snapshot: Ref<Snapshot | null>, refresh: () => Promis
         const canceled=kind==='stop-all' && canceling.has(item.installation_id);
         const text=item.error?`${item.error.code} · ${item.error.message}`:item.operation_done?'已完成':canceled?'已取消启动，正在停止':'已受理';
         activities.value.set(item.installation_id,{id:item.installation_id,label:snapshot.value?.apps.find(a=>a.installation_id===item.installation_id)?.label||item.installation_id,action:kind,text,done:!!item.error||!!item.operation_done,canceled});
-        if(id && !batch) { if(item.error) void feedbackController.failure(id,since.get(id)||Date.now()); else bubble(id,text); }
+        if(id && !batch) { if(item.error) void feedbackController.failure(id,since.get(id)||Date.now(),item.instance_id,item.error); else bubble(id,text); }
       }
       message.value = failures.length ? `${failures.length} 项操作未接受：${failures[0]?.error?.message}` : kind === 'stop-all' ? '正在全部停止 · 自动唤醒已暂停' : kind === 'resume-wake' ? '自动唤醒已恢复' : '操作已接受';
       await refresh();
@@ -80,12 +80,12 @@ export function useRuntime(snapshot: Ref<Snapshot | null>, refresh: () => Promis
         pending.set(id, { instance: receipt.instance_id, operation: receipt.operation_id });
       }
       observe(snapshot.value);
-    } catch (cause) { if (startedEpoch === epoch && !disposed) { message.value = `${errorMessage(cause).code} · ${errorMessage(cause).message}`; if(id){if(!batch)void feedbackController.failure(id,since.get(id)||Date.now());const item=activities.value.get(id);if(item){item.text=message.value;item.done=true;}} await refresh(); } }
+    } catch (cause) { if (startedEpoch === epoch && !disposed) { message.value = `${errorMessage(cause).code} · ${errorMessage(cause).message}`; if(id){if(!batch)void feedbackController.failure(id,since.get(id)||Date.now(),undefined,errorMessage(cause));const item=activities.value.get(id);if(item){item.text=message.value;item.done=true;}} await refresh(); } }
     finally { busy.value.delete(key); }
   }
   function observe(value: Snapshot | null) {
-    if (!value?.live) { pending.clear(); return; }
     feedbackController.resolved(value);
+    if (!value?.live) { pending.clear(); return; }
     for (const app of value.apps) {
       const runtime = app.runtime; if (!runtime) continue;
       const intent = pending.get(app.installation_id);
@@ -102,7 +102,7 @@ export function useRuntime(snapshot: Ref<Snapshot | null>, refresh: () => Promis
         const item=activities.value.get(app.installation_id);
         if(item){item.done=true;item.text=`${item.canceled?'已取消启动 · ':''}${text}`;}
         if(single.delete(app.installation_id)) {
-          if(runtime.operation_error || runtime.status.state==='FAILED' || runtime.management_uncertain) void feedbackController.failure(app.installation_id,since.get(app.installation_id)||Date.now(),runtime.instance_id);
+          if(runtime.operation_error || runtime.status.state==='FAILED' || runtime.management_uncertain) void feedbackController.failure(app.installation_id,since.get(app.installation_id)||Date.now(),runtime.instance_id,runtime.operation_error || {code:runtime.status.failure || 'OPERATION_FAILED',message:text});
           else bubble(app.installation_id,text);
         }
         message.value=`${app.label} · ${text}`;
@@ -110,6 +110,9 @@ export function useRuntime(snapshot: Ref<Snapshot | null>, refresh: () => Promis
     }
   }
   watch(snapshot, observe);
+  function skipped(id:string,text:string) {
+    activities.value.set(id,{id,label:snapshot.value?.apps.find(a=>a.installation_id===id)?.label||id,action:'start',text:`已跳过 · ${text}`,done:true});
+  }
   function dispose() { disposed = true; pending.clear(); feedbackController.dispose(); if (isTauri()) void invoke('desktop_unwatch'); }
-  return { canStopAll, activities, feedback, dismiss, intentEpoch: () => epoch, intentVersion: (id:string) => versions.get(id)||0, connect, resumeWatch, startWatch, dispose, action, open, connecting, busy, message };
+  return { skipped, canStopAll, activities, feedback, dismiss, intentEpoch: () => epoch, intentVersion: (id:string) => versions.get(id)||0, connect, resumeWatch, startWatch, dispose, action, open, connecting, busy, message };
 }

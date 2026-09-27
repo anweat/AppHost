@@ -269,7 +269,7 @@ CLI `journal [--cursor <event_id>] [--limit <1..200>] [--json]` 和同名 RPC �
 
 快照补充 operation_id、operation_done、脱离原始 details 的 operation_error.code/message、是否有浏览器入口及自动唤醒暂停标志。父目录只提供默认展示分组和名称，不创建后台分组。`desktop_open(installation_id, instance_id, operation_id)` 重新核验实时的同一操作/实例已 RUNNING 且服务存活就绪，随后打开核心生成的稳定 URL，不接受任意 URL。自动打开只绑定本次显式启动意图，消费一次后删除；停止、Stop All、断连或实例变更取消该意图，迟到回执不得恢复它。
 
-`desktop_preferences()` 只读 `ui.json`；外观结构包含 `{schema_version:1, theme:system|light|dark, groups, collapsed, show_recent, last_used, search}`；旧文件缺少新增字段时使用默认值，主题缺省跟随系统。`desktop_theme(theme)` 原子保存主题，损坏或不支持的文件不覆盖；不保存运行状态。`desktop_ui_edit(change)` 以同一文件锁更新单项外观设置，保留其他设置：search、recent、create-group、rename-group、dissolve-group、move、collapse、touch。自定义分组最多 128 个、名称最多 64 字符、总成员最多 1024 个且单一归属；折叠键最多 256 个，最近使用时间最多保留 1024 个安装。分组成员按登记顺序展示，移动只改变归属，解散回到默认父目录。最近使用组可关闭，登记数 ≥ 12 时最多显示 6 个图标，该区域以外不按时间重排。搜索设置为回车默认 primary/details、路径匹配开关、操作结果开关；它们只影响界面。颜色和尺寸规则沿用原型：停止为中性底、存活进程填充项目身份色，故障色仅用于角标和提示；磁贴随画布高度计算 1–3 行、窄窗 96–120px / 常规窗 104–148px。
+`desktop_preferences()` 只读 `ui.json`；外观结构包含 `{schema_version:1, theme:system|light|dark, groups, collapsed, show_recent, last_used, search}`；旧文件缺少新增字段时使用默认值，主题缺省跟随系统。`desktop_theme(theme)` 原子保存主题，损坏或不支持的文件不覆盖；不保存运行状态。`desktop_ui_edit(change)` 以同一文件锁更新单项外观设置，保留其他设置：search、recent、create-group、rename-group、dissolve-group、move、collapse、touch、prune。桌面端顺序提交外观写入，最近使用写入不丢弃同期设置修改；跨进程文件锁最多等待 1 秒，只对锁竞争等待，超时明确返回 BUSY。桌面观察到解除登记或打开旧库时，prune 在锁内按核心当前登记清理已解除安装的分组成员和最近使用引用；保留分组本身、折叠与其他设置，不修改项目。自定义分组最多 128 个、名称最多 64 字符、总成员最多 1024 个且单一归属；折叠键最多 256 个，最近使用时间最多保留 1024 个安装。分组成员按登记顺序展示，移动只改变归属，解散回到默认父目录。最近使用组可关闭，登记数 ≥ 12 时最多显示 6 个图标，该区域以外不按时间重排。搜索设置为回车默认 primary/details、路径匹配开关、操作结果开关；它们只影响界面。搜索期间隐藏没有匹配成员的自定义分组，清除搜索后恢复。颜色和尺寸规则沿用原型：停止为中性底、存活进程填充项目身份色，故障色仅用于角标和提示；磁贴随画布高度计算 1–3 行、窄窗 96–120px / 常规窗 104–148px。
 
 `desktop_snapshot()` 是只读观察接口，不创建目录或启动 daemon，返回 `{apps, live, automatic_wake_paused, read_at_ms, runtime_error}`。`apps` 按登记顺序排列，每项只包含 installation_id、project_id、label、path、group、group_label、registration_state、requires_confirmation、has_entry 与可选 runtime；runtime 仅包含实例 ID、安装 ID、operation_id/operation_done/operation_error、五态、失败代码、记录更新时间、created_at_ms、可选 started_at_ms、management_uncertain 及服务 name/port/alive/ready/startup_timeout_ms。started_at_ms 与派发完成后的就绪计时起点一致，老记录缺失时不虚构期限；准备阶段显示准备启动。该列表接口不向 WebView 传递 confirmed_services、confirmed_manifest、env 或 launch_context。运行查询错误保留为 runtime_error，不把未知状态当作 STOPPED；已成功取得的历史记录保留其五态和更新时间。整个读取失败时前端保留上次成功结果、撤销 live 标识并显示读取错误。没有事件订阅的快照必须显示观察时间，不能宣称持续实时；显式刷新期间合并重复读取请求。
 
@@ -283,7 +283,7 @@ CLI `journal [--cursor <event_id>] [--limit <1..200>] [--json]` 和同名 RPC �
 
 `desktop_candidate_external(token,index,external)` 只调整新推断候选的存储位置并轮换草稿 token，不写文件、不覆盖已有来源；最终导入才写入项目或 AppHost 管理目录。`desktop_manifest_switch_review(installation_id,target_source)` 返回当前/目标文本、路径、摘要、revision 与完整目标声明；`desktop_manifest_switch(installation_id,request)` 在显式确认后复核基线，必要时停止实例再切换，原文件保留。声明编辑展示有界差异预览及完整文本、命令参数数组、工作目录和端口摘要；失败编辑入口按服务及相关字段定位，不把日志行号误当作 TOML 行号。
 
-顶栏活动区按 installation_id 与 operation_id 跟踪回执；单应用成功结果在磁贴旁短暂显示，失败气泡保持到显式关闭或条件解除，读取本次失败的核心 advice.title/impact/主要 actions/连续次数；同因重复显示“与上次原因相同”。端口条件解除后改为可以重试，不自动启动；状态先于现场落盘时，最多读取 5 次，间隔合计 2 秒；只接受本次操作时间之后、匹配实例的现场。关闭、重试和新结果取消旧读取与条件订阅的影响。完整记录通过操作记录页读取。Stop All 聚合逐项结果，区分已停止、失败、取消启动及身份不确定的遗留进程。超过 5 秒的启动显示已等待时间及各服务有效期限；不增加前端运行状态机。分组启动尚未派发的成员被 Stop All 取消；成员有更新的显式操作时跳过旧批次意图。
+顶栏活动区按 installation_id 与 operation_id 跟踪回执；单应用成功结果在磁贴旁短暂显示，失败气泡保持到显式关闭或条件解除，读取本次失败的核心 advice.title/impact/主要 actions/连续次数；同因重复显示“与上次原因相同”。端口条件解除后改为可以重试，不自动启动；状态先于现场落盘时，最多读取 5 次，间隔合计 2 秒；只接受本次操作时间之后、匹配实例的现场。回执错误或捕获异常的 code/message 立即传入气泡：在没有匹配现场时显示实际原因、操作完成尚未确认的影响及一个主要操作，不用无关历史覆盖，也不提供“详情”按钮；读到匹配现场后才使用核心建议及详情入口。前置与控制错误不虚构失败记录或连续次数；新观察证明确认/路径/后台连接条件恢复或本次之后运行已恢复正常时收起提示，历史成功不能清除本次错误。关闭、重试和新结果取消旧读取与条件订阅的影响。完整记录通过操作记录页读取。Stop All 聚合逐项结果，区分已停止、失败、取消启动及身份不确定的遗留进程。超过 5 秒的启动显示已等待时间及各服务有效期限；不增加前端运行状态机。分组启动尚未派发的成员被 Stop All 取消；成员有更新的显式操作时跳过旧批次意图。
 
 桌面反馈（冻结稿 5.9、10.4）需要接口提供以下数据，前端只做比较和展示，不自行推断或累计：
 
@@ -300,7 +300,7 @@ CLI `journal [--cursor <event_id>] [--limit <1..200>] [--json]` 和同名 RPC �
 
 daemon 恢复只续接尚未派发采集器和服务的已保存目标意图，利用预分配的 stop operation_id 识别停止是否已接受；已有派发意图仍按原有身份核验规则处理，不重复启动。Stop All、显式停止目标或缺失 wake.json 的保守恢复取消后半段；已经接受的占用者停止继续完成。
 
-- 批量结果：stop-all 逐项返回 stopped、failed（原因）、canceled（取消的待启动）和 orphan（身份无法确认、未结束的进程及证据）。分组只是 ui.json 的外观数据，daemon 不感知分组：分组启停由桌面端对各安装分别发起 start / stop，在本地聚合为一次活动区结果，skipped（待确认、源码缺失）由桌面端在发起前判定。
+- 批量结果：stop-all 逐项返回 stopped、failed（原因）、canceled（取消的待启动）和 orphan（身份无法确认、未结束的进程及证据）。分组只是 ui.json 的外观数据，daemon 不感知分组：分组启停由桌面端对各安装分别发起 start / stop，在本地聚合为一次活动区结果，skipped（待确认、源码缺失）由桌面端在发起前判定，每项记录到活动区并保留应用名和跳过原因，不合并成一条被后续消息覆盖的提示。
 
 展示组件只接收数据并发出用户动作，不独立管理运行状态或排序。磁贴按安装展示顺序渲染，启动结果、失败、日志刷新不改变顺序。日志刷新仅在显式操作时读取当前安装的日志窗口，保留刷新时间与离线反馈；命令行组件在原型中只演示项目目录与系统终端入口，不提供嵌入式 shell，也不旁路核心执行启动命令。正式 `desktop_terminal(installation_id)` 从当前登记解析存在的项目目录，macOS 使用系统 Terminal 的目录打开能力；不拼接 shell 文本、不提交命令，不改变 AppHost 的运行环境基线。其他平台尚未接入时明确返回 UNSUPPORTED_PLATFORM。
 

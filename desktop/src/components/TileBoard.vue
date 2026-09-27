@@ -5,7 +5,7 @@ import type { Preferences } from '../preferences';
 import type { SearchAction } from '../search';
 import { runtimeBlocked, type AppEntry, type Snapshot } from '../model';
 import type { Feedback } from '../useFeedback';
-const props = defineProps<{ apps: AppEntry[]; snapshot: Snapshot; lens: string | null; preferences:Preferences; feedback:Map<string,Feedback> }>();
+const props = defineProps<{ apps: AppEntry[]; filtering?:boolean; snapshot: Snapshot; lens: string | null; preferences:Preferences; feedback:Map<string,Feedback> }>();
 const emit = defineEmits<{ details: [id: string]; primary: [id: string]; preference:[value:unknown]; batch:[kind:'start'|'stop',ids:string[]]; action:[action:SearchAction,id:string]; manage:[]; dismiss:[id:string]; feedbackAction:[id:string,item:Feedback] }>();
 const groups = computed(() => {
   const result = new Map<string, { name: string; apps: AppEntry[] }>();
@@ -15,7 +15,7 @@ const groups = computed(() => {
     if(!result.has(key))result.set(key,{name:custom?.name || app.group_label || '应用',apps:[]});
     result.get(key)!.apps.push(app);
   }
-  for(const group of props.preferences.groups) if(!result.has(group.id)) result.set(group.id,{name:group.name,apps:[]});
+  for(const group of props.preferences.groups) if(!props.filtering && !result.has(group.id)) result.set(group.id,{name:group.name,apps:[]});
   return [...result].map(([key,value])=>({key,...value}));
 });
 const recent = computed(() => !props.preferences.show_recent || props.snapshot.apps.length<12 ? [] : props.apps.filter(a=>props.preferences.last_used[a.installation_id]).slice().sort((a,b)=>(props.preferences.last_used[b.installation_id]||0)-(props.preferences.last_used[a.installation_id]||0)).slice(0,6));

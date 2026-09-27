@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref }
 from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 
-import type { Feedback } from '../useFeedback';
+import { feedbackPrimary, type Feedback } from '../useFeedback';
 import AppIcon from './AppIcon.vue';
 import { runtimeBlocked, hasLiveServices, identityHue, stateLabel, tileState, type AppEntry, type Snapshot } from '../model';
 const props = defineProps<{ app: AppEntry; snapshot: Snapshot; feedback?:Feedback }>();
@@ -36,9 +36,9 @@ const label = computed(() => [props.app.label, stateLabel(props.app, props.snaps
     <div v-if="feedback" :id="`feedback-${app.installation_id}-${$.uid}`" class="tile-feedback" role="status" @keydown.esc.stop="$emit('dismiss',app.installation_id); ($el.querySelector('.tile-main') as HTMLElement)?.focus()">
       <button class="bubble-close" aria-label="关闭应用提示" @click="$emit('dismiss',app.installation_id)">×</button>
       <strong>{{ feedback.cleared ? '端口已释放，可以重试' : feedback.text }}</strong>
-      <template v-if="feedback.persistent"><p v-if="feedback.report?.advice">{{ feedback.report.advice.impact }}</p><p v-if="(feedback.report?.advice?.consecutive_same_cause || 0) > 1">与上次原因相同</p>
-        <button v-if="feedback.cleared || feedback.report?.advice?.actions.some(a=>a.primary)" :disabled="(runtimeBlocked(snapshot) || app.requires_confirmation || app.registration_state==='SOURCE_MISSING') && (feedback.cleared || ['retry','stop_owner_and_start'].includes(feedback.report?.advice?.actions.find(a=>a.primary)?.id || ''))" @click="$emit('feedbackAction',app.installation_id,feedback)">{{ feedback.cleared ? '重新启动' : feedback.report?.advice?.actions.find(a=>a.primary)?.title }}</button>
-        <button @click="$emit('details',app.installation_id)">详情</button>
+      <template v-if="feedback.persistent"><p v-if="feedback.error" class="muted">{{ feedback.error.code }}</p><p v-if="feedback.report?.advice?.impact || feedback.impact">{{ feedback.report?.advice?.impact || feedback.impact }}</p><p v-if="(feedback.report?.advice?.consecutive_same_cause || 0) > 1">与上次原因相同</p>
+        <button v-if="feedback.cleared || feedbackPrimary(feedback)" :disabled="(runtimeBlocked(snapshot) || app.requires_confirmation || app.registration_state==='SOURCE_MISSING') && (feedback.cleared || ['retry','stop_owner_and_start'].includes(feedbackPrimary(feedback)?.id || ''))" @click="$emit('feedbackAction',app.installation_id,feedback)">{{ feedback.cleared ? '重新启动' : feedbackPrimary(feedback)?.title }}</button>
+        <button v-if="feedback.report?.failure" @click="$emit('details',app.installation_id)">详情</button>
       </template>
     </div>
     <button class="tile-more" aria-label="应用详情与操作" @click="$emit('details', app.installation_id)">···</button>

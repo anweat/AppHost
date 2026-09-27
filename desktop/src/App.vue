@@ -7,7 +7,7 @@ import AppIcon from './components/AppIcon.vue';
 import ManagementPanel from './components/ManagementPanel.vue';
 import AppDetails from './components/AppDetails.vue';
 import FirstRunLogin from './components/FirstRunLogin.vue';
-import type { Feedback } from './useFeedback';
+import { feedbackPrimary, type Feedback } from './useFeedback';
 import DiagnosticPreview from './components/DiagnosticPreview.vue';
 import {commandText} from './diagnostics';
 import { runtimeBlocked, type Snapshot } from './model';
@@ -33,19 +33,31 @@ async function loadTheme() {
   try { preferences.value = {...defaults(),...await invoke<Preferences>('desktop_preferences')}; applyTheme(preferences.value.theme); }
   catch { preferenceError.value = '外观设置读取失败，已保留原文件。'; }
 }
-async function saveTheme(value: string) {
-  savingTheme.value = true;
-  try { preferences.value=await invoke<Preferences>('desktop_theme', { theme: value }); applyTheme(preferences.value.theme); preferenceError.value = ''; }
-  catch { preferenceError.value = '外观设置保存失败，请检查数据目录。'; }
-  finally { savingTheme.value = false; }
+// Serialize this window's preference writes; a recent-use touch cannot discard
+// a concurrent group edit, and no second copy of preferences is maintained.
+let preferenceWrites=Promise.resolve(), queuedPreferences=0;
+function writePreference(task:()=>Promise<Preferences>, failure:string) {
+  queuedPreferences++; savingTheme.value=true;
+  const result=preferenceWrites.then(async()=>{
+    try {preferences.value=await task();applyTheme(preferences.value.theme);preferenceError.value='';}
+    catch {preferenceError.value=failure;}
+    finally {savingTheme.value=--queuedPreferences>0;}
+  });
+  preferenceWrites=result; return result;
 }
-async function editPreference(change: unknown) {
-  if (savingTheme.value) return;
-  savingTheme.value=true;
-  try {preferences.value=await invoke<Preferences>('desktop_ui_edit',{change});preferenceError.value='';}
-  catch(e) {preferenceError.value='布局或搜索设置未保存，请刷新后重试。';}
-  finally {savingTheme.value=false;}
+function saveTheme(value:string) {
+  return writePreference(()=>invoke<Preferences>('desktop_theme',{theme:value}),'外观设置保存失败，请检查数据目录。');
 }
+function editPreference(change:unknown) {
+  return writePreference(()=>invoke<Preferences>('desktop_ui_edit',{change}),'布局或搜索设置未保存，请刷新后重试。');
+}
+// Reconcile on detach and when opening a library with old detached references.
+// Core rechecks registry identities; a stale UI snapshot cannot delete active refs.
+watch(()=>{
+  if(!displayed.value)return false;
+  const active=new Set(displayed.value.apps.map(a=>a.installation_id));
+  return preferences.value.groups.some(g=>g.members.some(id=>!active.has(id))) || Object.keys(preferences.value.last_used).some(id=>!active.has(id));
+}, stale=>{if(stale)void editPreference({kind:'prune'});});
 const counts = computed(() => ({
   running: displayed.value?.apps.filter(app => app.runtime?.status.state === 'STARTING' || app.runtime?.services.some(service => service.alive)).length || 0,
   failed: displayed.value?.apps.filter(app => app.runtime?.status.state === 'FAILED' && !app.requires_confirmation).length || 0,
@@ -83,9 +95,11 @@ async function primary(id: string) {
   } else await runtime.action(state === 'FAILED' && app.runtime?.services.some(service => service.alive) ? 'restart' : 'start', id);
 }
 async function feedbackAction(id:string, item:Feedback) {
-  const action=item.cleared ? 'retry' : item.report?.advice?.actions.find(a=>a.primary)?.id;
+  const action=item.cleared ? 'retry' : feedbackPrimary(item)?.id;
   if(action==='retry') await runtime.action('restart',id);
   else if(action==='stop_owner_and_start') await runtime.action('stop-owner-and-start',id,item.report?.failure?.failure_id);
+  else if(action==='refresh_status') await refresh();
+  else if(action==='view_activity') activityOpen.value=true;
   else if(action==='relink') manage('applications',id);
   else if(action==='view_environment') manage('environment',id);
   else if(action==='preview_diagnostics' && item.report?.failure) diagnostic.value={id,failureId:item.report.failure.failure_id};
@@ -115,7 +129,7 @@ async function batch(kind:'start'|'stop', ids:string[]) {
     if(kind==='start' && runtime.intentEpoch()!==epoch)break;
     if(kind==='start' && runtime.intentVersion(id)!==versions.get(id))continue;
     const app=displayed.value?.apps.find(a=>a.installation_id===id); if(!app)continue;
-    if(kind==='start' && (app.requires_confirmation || app.registration_state==='SOURCE_MISSING')) {runtime.message.value=`${app.label} · 已跳过，请先处理启动声明或项目路径`;continue;}
+    if(kind==='start' && (app.requires_confirmation || app.registration_state==='SOURCE_MISSING')) {runtime.skipped(id,'请先处理启动声明或项目路径');activityOpen.value=true;continue;}
     await runtime.action(kind,id,undefined,true);
   }
 }
@@ -191,7 +205,7 @@ onUnmounted(() => { runtime.dispose(); clearInterval(clockTimer); window.removeE
       <main :aria-busy="loading">
         <ManagementPanel v-if="managementOpened" v-show="view === 'manage'" v-model:section="managementSection" v-model:installation-id="environmentApp" :apps="displayed?.apps || []" :theme="theme" :saving="savingTheme" :preferences="preferences" @preference="editPreference" @theme="saveTheme" @home="view = 'home'" @changed="invalidate(); runtime.resumeWatch(); loginPrompt?.refresh()" @review="view = 'home'; details($event, 'manifest')"/>
         <section v-if="view === 'home' && search && results.showActions" class="search-actions" aria-label="操作搜索结果"><div v-for="app in filtered.slice(0,12)" :key="app.installation_id"><button v-for="action in results.actions" :key="action" :disabled="runtimeBlocked(displayed) && ['start','stop','restart'].includes(action)" @click="searchExecute(action,app.installation_id)">{{ {start:'启动',stop:'停止',restart:'重启',logs:'日志',details:'详情',failure:'失败现场',manifest:'声明',primary:'打开'}[action] }} {{ app.label }}</button></div></section>
-        <TileBoard v-if="view === 'home' && filtered.length && displayed && !(results.onlyActions && results.showActions)" :apps="filtered" :snapshot="displayed" :lens="lens" :preferences="preferences" :feedback="runtime.feedback.value" @dismiss="runtime.dismiss" @feedback-action="feedbackAction" @preference="editPreference" @batch="batch" @action="searchExecute" @manage="manage('groups')" @details="details" @primary="primary"/>
+        <TileBoard v-if="view === 'home' && filtered.length && displayed && !(results.onlyActions && results.showActions)" :apps="filtered" :filtering="!!search.trim()" :snapshot="displayed" :lens="lens" :preferences="preferences" :feedback="runtime.feedback.value" @dismiss="runtime.dismiss" @feedback-action="feedbackAction" @preference="editPreference" @batch="batch" @action="searchExecute" @manage="manage('groups')" @details="details" @primary="primary"/>
         <div v-else-if="view === 'home' && !loading && !filtered.length" class="empty"><h2>{{ error ? '暂时无法读取应用' : displayed?.apps.length ? '没有匹配的应用' : '还没有应用' }}</h2><p>{{ error ? '检查后台或目录后重试。' : displayed?.apps.length ? '试试其他名称。' : '选择项目目录，确认后加入磁贴。' }}</p><button v-if="search" @click="search = ''">清除搜索</button><button v-else-if="!error" class="primary" @click="add">＋ 添加应用</button><button v-else @click="refresh">重新读取</button></div>
       </main>
       <AppDetails v-if="selected && displayed" v-show="view === 'home'" :key="selected.installation_id" v-model:tab="detailTab" :app="selected" :snapshot="displayed" :busy="runtime.busy.value.has(selected.installation_id)" @action="runtime.action($event, selected.installation_id)" @close="closeDetails" @changed="runtime.message.value = ''; invalidate(); if (!displayed?.live) runtime.resumeWatch()" @dirty="editorDirty = $event" @environment="manage('environment', selected.installation_id)" @relink="manage('applications', selected.installation_id)" @owner="runtime.action('stop-owner-and-start', selected.installation_id, $event)" />
