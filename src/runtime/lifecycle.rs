@@ -89,6 +89,8 @@ pub struct Record {
     pub restart_after_stop: bool,
     pub status: InstanceStatus,
     pub created_at_ms: u128,
+    #[serde(default)]
+    pub started_at_ms: Option<u128>,
     pub updated_at_ms: u128,
     #[serde(default)]
     pub failure_id: Option<Uuid>,
@@ -214,6 +216,7 @@ fn declared_record(id: Uuid, op: Uuid, manifest: &crate::Manifest, epoch: u64) -
         restart_after_stop: false,
         status: InstanceStatus::default(),
         created_at_ms: now(),
+        started_at_ms: None,
         updated_at_ms: now(),
         failure_id: None,
         failure_at_ms: None,

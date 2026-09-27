@@ -27,6 +27,12 @@ async function group(index: number, merge: boolean) {
   catch (error) { message.value = errorMessage(error).message; }
   finally { busy.value = false; }
 }
+async function storage(index:number, external:boolean) {
+  if (busy.value || finished.value) return;
+  busy.value=true; message.value='';
+  try { const result=await invoke<ScanResult>('desktop_candidate_external',{token:token.value,index,external}); result.draft.candidates.forEach(c => c.selected=false); token.value=result.token; editable.value=result.editable; draft.value=result.draft; }
+  catch(e) {message.value=errorMessage(e).message;} finally {busy.value=false;}
+}
 async function edit(index: number) {
   if (busy.value || finished.value || editing.value) return;
   busy.value = true; message.value = '';
@@ -100,12 +106,14 @@ path = "/"</pre><p class="muted">示例仅说明写法，请使用项目自己�
               <details><summary>完整清单与入口</summary><pre class="declaration-preview">{{ JSON.stringify(candidate.manifest, null, 2) }}</pre></details>
               <p v-for="(note,i) in candidate.notes" :key="i" class="notice">{{ note.message }}</p>
             </template>
+            <label v-if="editable[index]">清单位置 <select :value="candidate.external ? 'external' : 'project'" :disabled="!!draft.groups.length" @change="storage(index, ($event.target as HTMLSelectElement).value === 'external')"><option value="project">项目内 apphost.toml</option><option value="external">AppHost 外置清单</option></select></label>
+            <p v-if="candidate.external" class="muted">声明保存在 AppHost 数据目录，不写入项目。</p>
             <button v-if="editable[index]" :disabled="!!draft.groups.length" @click="edit(index)">{{ !candidate.manifest?.services.length || candidate.issues.length ? '补全启动声明' : '编辑启动声明' }}</button>
             <p v-else-if="!candidate.manifest?.services.length || candidate.issues.length" class="muted">已有清单存在问题，请修正项目清单后重新扫描；导入不会覆盖已有清单。</p>
           </section>
         </fieldset>
         <p v-if="!draft.candidates.length" class="muted">未发现应用，可选择具体项目目录重试。</p>
-        <p class="muted">确认后登记所选应用；缺少清单时创建 apphost.toml，不会启动服务。</p>
+        <p class="muted">确认后登记所选应用；缺少清单时按所选位置创建声明，不会启动服务。</p>
         <button class="primary" :disabled="busy || finished || !!editing || !count || !!draft.groups.length" @click="save">确认并登记{{ count ? ` ${count} 个应用` : '' }}</button>
       </template>
     </div>

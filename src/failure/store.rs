@@ -64,8 +64,21 @@ fn writer(data: &Path, id: Uuid) -> Result<(PathBuf, fs::File)> {
     {
         return Err(invalid("Invalid failure lock"));
     }
-    lock.try_lock_exclusive()
-        .map_err(|_| Error::new("BUSY", "Failure evidence writer is busy"))?;
+    // Tail capture and lifecycle history can write the same installation at once.
+    // Absorb short contention without retrying an entire evidence publication.
+    let until = std::time::Instant::now() + std::time::Duration::from_millis(200);
+    loop {
+        match lock.try_lock_exclusive() {
+            Ok(()) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if std::time::Instant::now() >= until {
+                    return Err(Error::new("BUSY", "Failure evidence writer is busy"));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(4));
+            }
+            Err(e) => return Err(storage::io_error(&path, e)),
+        }
+    }
     Ok((dir, lock))
 }
 fn history(dir: &Path) -> Result<History> {
@@ -267,6 +280,7 @@ pub fn read(data: &Path, id: Uuid, failure_id: Option<Uuid>) -> Result<Value> {
     });
     Ok(
         json!({"installation_id":id,"failure":f,"history":h,"consecutive_same_cause":consecutive,"count_limited_by_retention":consecutive==Some(20),
+        "records":records.iter().map(|f| json!({"failure_id":f.failure_id,"at_ms":f.at_ms,"code":f.evidence.code})).collect::<Vec<_>>(),
         "details_expired":selected.is_some()&&f.is_none()}),
     )
 }
@@ -274,6 +288,23 @@ pub fn read(data: &Path, id: Uuid, failure_id: Option<Uuid>) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn writer_waits_for_short_contention_but_remains_bounded() {
+        let t = tempfile::tempdir().unwrap();
+        let data = t.path().join("data");
+        let id = Uuid::new_v4();
+        let (_, lock) = writer(&data, id).unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            drop(lock);
+        });
+        let (_, acquired) = writer(&data, id).unwrap();
+        release.join().unwrap();
+        let start = std::time::Instant::now();
+        assert_eq!(writer(&data, id).unwrap_err().code, "BUSY");
+        assert!(start.elapsed() >= std::time::Duration::from_millis(190));
+        drop(acquired);
+    }
     #[test]
     fn history_keeps_new_success_context_and_reads_missing_without_writes() {
         let t = tempfile::tempdir().unwrap();

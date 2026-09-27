@@ -18,15 +18,24 @@ pub fn show(data: &Path) -> Result<Value> {
     }
 }
 pub fn set(data: &Path, enabled: bool) -> Result<Value> {
+    let executable = std::env::current_exe().map_err(|e| Error::new("IO_ERROR", e.to_string()))?;
+    set_executable(
+        data,
+        &executable,
+        enabled,
+        crate::journal::Actor::from_environment()?,
+    )
+}
+/// Desktop registration must point at the bundled CLI, not its GUI entry point.
+pub fn set_executable(
+    data: &Path,
+    executable: &Path,
+    enabled: bool,
+    actor: crate::journal::Actor,
+) -> Result<Value> {
     #[cfg(target_os = "macos")]
     {
-        let actor = crate::journal::Actor::from_environment()?;
-        let result = macos::set(
-            data,
-            &macos::home()?,
-            &std::env::current_exe().map_err(|e| Error::new("IO_ERROR", e.to_string()))?,
-            enabled,
-        );
+        let result = macos::set(data, &macos::home()?, executable, enabled);
         crate::journal::record_result(
             data,
             if enabled {
@@ -41,7 +50,7 @@ pub fn set(data: &Path, enabled: bool) -> Result<Value> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (data, enabled);
+        let _ = (data, executable, enabled, actor);
         Err(Error::new(
             "UNSUPPORTED_PLATFORM",
             "Login registration requires macOS",

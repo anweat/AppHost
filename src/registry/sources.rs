@@ -276,7 +276,7 @@ pub fn review_switch(data: &Path, id: Uuid, target: ManifestSource) -> Result<se
         json!({"installation_id":id,"revision":i.revision,"from_source":i.manifest_source,
         "from_path":before["manifest_path"],"base_sha256":before["base_sha256"],"before_text":before["text"],
         "target_source":target,"target_path":path,"target_sha256":hash,"after_text":text,
-        "launch_sha256":manifest.launch_sha256(),"warnings":manifest.launch_warnings(&i.path),"original_retained":true}),
+        "manifest":manifest,"launch_sha256":manifest.launch_sha256(),"warnings":manifest.launch_warnings(&i.path),"original_retained":true}),
     )
 }
 fn checked_switch(

@@ -34,11 +34,18 @@ pub struct Instance {
     operation_error: Option<Failure>,
     status: Status,
     updated_at_ms: u64,
+    #[serde(default)]
+    created_at_ms: u64,
+    #[serde(default)]
+    started_at_ms: Option<u64>,
+    #[serde(default)]
+    management_uncertain: bool,
     services: Vec<Service>,
 }
 #[derive(Deserialize, Serialize)]
 struct Failure {
     code: String,
+    #[serde(default)]
     message: String,
 }
 #[derive(Deserialize, Serialize)]
@@ -52,6 +59,8 @@ struct Service {
     port: Option<u16>,
     alive: bool,
     ready: bool,
+    #[serde(default)]
+    startup_timeout_ms: u64,
 }
 #[derive(Deserialize)]
 struct Observation {
@@ -183,7 +192,7 @@ mod tests {
     fn runtime_projection_drops_launch_secrets() {
         let observation: Observation = serde_json::from_value(serde_json::json!({
             "live":false, "instances":[{
-                "installation_id":Uuid::nil(),"instance_id":Uuid::nil(),"updated_at_ms":42,
+                "installation_id":Uuid::nil(),"instance_id":Uuid::nil(),"updated_at_ms":42,"started_at_ms":20,"operation_error":{"code":"STOP_FAILED"},
                 "status":{"state":"FAILED","failure":"SERVICE_EXITED"},
                 "services":[{"name":"web","port":3000,"alive":true,"ready":false}],
                 "launch_context":{"env":{"TOKEN":"secret-must-not-cross"}}
@@ -193,5 +202,7 @@ mod tests {
         let value = serde_json::to_string(&observation.instances).unwrap();
         assert!(!value.contains("secret-must-not-cross"));
         assert!(value.contains("FAILED"));
+        assert!(value.contains("\"started_at_ms\":20"));
+        assert!(value.contains("STOP_FAILED"));
     }
 }

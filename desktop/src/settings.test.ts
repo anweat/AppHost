@@ -1,4 +1,5 @@
 // @vitest-environment happy-dom
+import { defaults } from './preferences';
 import { flushPromises, mount } from '@vue/test-utils';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 const { invoke } = vi.hoisted(() => ({invoke:vi.fn()}));
@@ -71,14 +72,14 @@ describe('retention and management boundaries', () => {
   });
   it('lazily reads visited pages and keeps environment edits while navigating', async () => {
     invoke.mockImplementation((cmd: string) => Promise.resolve(cmd === 'desktop_environment_read' ? baseline : retention));
-    const panel = mount(ManagementPanel,{props:{theme:'light',saving:false,apps}}); await flushPromises(); expect(invoke).not.toHaveBeenCalled();
+    const panel = mount(ManagementPanel,{props:{theme:'light',saving:false,preferences:defaults(),apps}}); await flushPromises(); expect(invoke).not.toHaveBeenCalled();
     await button(panel,'运行环境').trigger('click'); await flushPromises(); await panel.find('textarea').setValue('/draft');
     await button(panel,'日志保留').trigger('click'); await flushPromises(); await button(panel,'运行环境').trigger('click');
     expect(panel.find('textarea').element.value).toBe('/draft'); expect(invoke.mock.calls.map(c => c[0])).toEqual(['desktop_environment_read','desktop_retention_read']); panel.unmount();
   });
   it('keeps retention available when the platform cannot supply environment settings', async () => {
     invoke.mockRejectedValueOnce({code:'UNSUPPORTED_PLATFORM',message:'unsupported'}).mockResolvedValueOnce(retention);
-    const panel = mount(ManagementPanel,{props:{theme:'light',saving:false,apps,section:'environment'}}); await flushPromises(); expect(panel.text()).toContain('UNSUPPORTED_PLATFORM');
+    const panel = mount(ManagementPanel,{props:{theme:'light',saving:false,preferences:defaults(),apps,section:'environment'}}); await flushPromises(); expect(panel.text()).toContain('UNSUPPORTED_PLATFORM');
     await button(panel,'日志保留').trigger('click'); await flushPromises(); expect(panel.find('input').element.value).toBe('7'); panel.unmount();
   });
 });

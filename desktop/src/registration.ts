@@ -9,11 +9,11 @@ export interface Draft {
   groups: { members: string[]; candidate: Candidate }[];
   [key: string]: unknown;
 }
-export interface ManifestRead { revision: number; base_sha256: string; text: string; manifest_path: string }
+export interface ManifestRead { manifest_source?:'project'|'external'; revision: number; base_sha256: string; text: string; manifest_path: string }
 export interface ManifestReview extends Omit<ManifestRead, 'text'> {
   before_text: string; after_text: string; launch_sha256: string;
   previous_confirmation: { manifest: unknown; services: unknown };
-  manifest: unknown; warnings: Issue[];
+  manifest: {services: {name:string;command:string[];cwd?:string;port?:number;env?:Record<string,string>}[];open?:unknown}; warnings: Issue[];
 }
 export interface SaveReceipt { confirmed?: boolean; operation_id?: string; operation_done?: boolean; error?: {code: string; message: string} }
 

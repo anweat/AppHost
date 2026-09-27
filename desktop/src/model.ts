@@ -1,10 +1,10 @@
 export type State = 'STOPPED' | 'STARTING' | 'RUNNING' | 'STOPPING' | 'FAILED';
 export interface CoreError { code: string; message: string }
 export interface Instance {
-  installation_id: string; instance_id: string; updated_at_ms: number;
+  installation_id: string; instance_id: string; updated_at_ms: number; created_at_ms?: number; started_at_ms?: number | null; management_uncertain?:boolean;
   operation_id?: string; operation_done?: boolean; operation_error?: CoreError | null;
   status: { state: State; failure: string | null };
-  services: { name: string; port: number | null; alive: boolean; ready: boolean }[];
+  services: { name: string; port: number | null; alive: boolean; ready: boolean; startup_timeout_ms?:number }[];
 }
 export interface AppEntry {
   installation_id: string; project_id: string; label: string; path: string; group?: string; group_label?: string;

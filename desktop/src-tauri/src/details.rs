@@ -26,9 +26,13 @@ pub async fn desktop_logs(installation_id: Uuid, instance_id: Uuid) -> Result<Va
 }
 
 #[tauri::command]
-pub async fn desktop_failure(installation_id: Uuid) -> Result<Value> {
+pub async fn desktop_failure(installation_id: Uuid, failure_id: Option<Uuid>) -> Result<Value> {
     tauri::async_runtime::spawn_blocking(move || {
-        apphost::failure::read(&apphost::paths::data_dir(None)?, installation_id, None)
+        apphost::failure::read(
+            &apphost::paths::data_dir(None)?,
+            installation_id,
+            failure_id,
+        )
     })
     .await
     .map_err(join_error)?
@@ -124,4 +128,18 @@ mod tests {
             "SOURCE_MISSING"
         );
     }
+}
+
+#[tauri::command]
+pub async fn desktop_icon(installation_id: Uuid) -> Result<Option<Value>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let data = apphost::paths::data_dir(None)?;
+        let Some(icon) = apphost::icon::discover(&data, installation_id)? else {
+            return Ok(None);
+        };
+        let bytes = apphost::icon::read(&data, installation_id, &icon.path, &icon.sha256)?;
+        Ok(Some(json!({"mime":icon.mime,"bytes":bytes})))
+    })
+    .await
+    .map_err(join_error)?
 }

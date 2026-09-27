@@ -12,6 +12,15 @@ function ready(value: Snapshot): Snapshot {
   return { ...value, apps: value.apps.map(app => ({ ...app, runtime: { ...receipt, updated_at_ms:2, status:{state:'RUNNING' as const,failure:null}, services:[{name:'web',port:3000,alive:true,ready:true}], operation_done:true } })) };
 }
 describe('explicit desktop runtime intent', () => {
+  it.each(['start', 'restart', 'stop-all'] as const)('dispatches offline %s once and reconnects observations', async kind => {
+    invoke.mockReset().mockResolvedValue(receipt);
+    const value = ref({...snapshot(),live:false}), scope = effectScope(), connected = vi.fn();
+    const runtime = scope.run(() => useRuntime(value, async () => {}, vi.fn(), connected, vi.fn()))!;
+    await runtime.action(kind, kind === 'stop-all' ? undefined : 'app');
+    expect(invoke.mock.calls.filter(c => c[0] === 'desktop_action')).toHaveLength(1);
+    expect(connected).toHaveBeenCalledOnce(); scope.stop();
+  });
+
   it('opens once for the matching ready instance, never for repeated snapshots', async () => {
     invoke.mockReset().mockImplementation(async (command: string) => command === 'desktop_action' ? receipt : undefined);
     const value = ref(snapshot()), scope = effectScope();
@@ -55,5 +64,19 @@ describe('explicit desktop runtime intent', () => {
     await nextTick();
     expect(invoke.mock.calls.filter(call => call[0] === 'desktop_open')).toHaveLength(0);
     scope.stop();
+  });
+});
+
+describe('batch activity outcomes', () => {
+  it('keeps every Stop All item and distinguishes cancellation, errors and orphaned processes', async () => {
+    const value=ref(snapshot()),scope=effectScope();
+    value.value.apps[0]!.runtime={...receipt,updated_at_ms:1,operation_done:false,status:{state:'STARTING',failure:null},services:[]};
+    value.value.apps.push({...value.value.apps[0]!,installation_id:'other',label:'Other',runtime:null});
+    invoke.mockReset().mockResolvedValue({results:[{...receipt,operation_id:'stop'},{installation_id:'other',error:{code:'BUSY',message:'busy'}}]});
+    const runtime=scope.run(()=>useRuntime(value,async()=>{},vi.fn(),vi.fn(),vi.fn()))!;
+    await runtime.action('stop-all');
+    expect(runtime.activities.value.get('app')?.text).toContain('取消启动');expect(runtime.activities.value.get('other')?.text).toContain('BUSY');
+    value.value={...value.value,apps:value.value.apps.map(a=>a.installation_id==='app'?{...a,runtime:{...a.runtime!,operation_id:'stop',operation_done:true,management_uncertain:true,status:{state:'FAILED',failure:'MANAGEMENT_UNCERTAIN'}}}:a)};await nextTick();
+    expect(runtime.activities.value.get('app')?.text).toContain('遗留进程');runtime.dispose();scope.stop();
   });
 });

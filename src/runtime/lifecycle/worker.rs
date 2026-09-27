@@ -266,6 +266,12 @@ pub(super) fn run(
         {
             let result = spawn(manager, h, prepared, live);
             started = Instant::now();
+            if result.is_ok() {
+                let mut record = h.record.lock().unwrap();
+                // Match the readiness clock, excluding collector/dispatch preparation.
+                record.started_at_ms = Some(now());
+                save_record(&manager.data, &mut record, &manager.events)?;
+            }
             if let Err(error) = result {
                 let mut r = h.record.lock().unwrap();
                 r.status.fail(&error.code);

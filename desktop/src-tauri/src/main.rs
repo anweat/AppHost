@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod details;
+mod management;
 mod registration;
 mod runtime;
 mod settings;
@@ -25,6 +26,14 @@ async fn desktop_theme(theme: apphost::ui::Theme) -> apphost::Result<apphost::ui
     .await
     .map_err(|e| apphost::Error::new("DESKTOP_WRITE_FAILED", e.to_string()))?
 }
+#[tauri::command]
+async fn desktop_ui_edit(change: apphost::ui::Edit) -> apphost::Result<apphost::ui::Preferences> {
+    tauri::async_runtime::spawn_blocking(move || {
+        apphost::ui::edit(&apphost::paths::data_dir(None)?, change)
+    })
+    .await
+    .map_err(|e| apphost::Error::new("UI_INVALID", e.to_string()))?
+}
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -33,14 +42,22 @@ fn main() {
         .manage(registration::DraftBuffer::default())
         .invoke_handler(tauri::generate_handler![
             desktop_snapshot,
+            management::desktop_detach,
+            management::desktop_relink,
+            management::desktop_operation,
+            management::desktop_journal,
             runtime::desktop_connect,
             runtime::desktop_open,
             runtime::desktop_action,
             runtime::desktop_watch,
             runtime::desktop_unwatch,
+            runtime::desktop_condition_watch,
+            runtime::desktop_condition_unwatch,
             desktop_preferences,
             desktop_theme,
+            desktop_ui_edit,
             details::desktop_logs,
+            details::desktop_icon,
             details::desktop_failure,
             details::desktop_diagnostics,
             details::desktop_terminal,
@@ -48,11 +65,18 @@ fn main() {
             registration::desktop_scan,
             registration::desktop_group,
             registration::desktop_import,
+            registration::desktop_candidate_external,
             registration::desktop_candidate_read,
             registration::desktop_candidate_review,
+            registration::desktop_manifest_switch_review,
+            registration::desktop_manifest_switch,
             registration::desktop_manifest_read,
             registration::desktop_manifest_review,
             registration::desktop_manifest_save,
+            settings::desktop_login_read,
+            settings::desktop_login_save,
+            settings::desktop_gateway_read,
+            settings::desktop_gateway_save,
             settings::desktop_environment_read,
             settings::desktop_environment_save,
             settings::desktop_environment_capture,

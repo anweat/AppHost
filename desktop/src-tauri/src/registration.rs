@@ -60,6 +60,47 @@ impl DraftBuffer {
         *buffer = Some(result.clone());
         Ok(result)
     }
+    fn external(
+        &self,
+        data: &Path,
+        token: Uuid,
+        index: usize,
+        external: bool,
+    ) -> Result<ScanResult> {
+        let mut buffer = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let current = buffer
+            .as_ref()
+            .filter(|s| s.token == token)
+            .ok_or_else(stale)?;
+        if !current.draft.groups.is_empty()
+            || !current.editable.get(index).copied().unwrap_or(false)
+        {
+            return Err(Error::new(
+                "SOURCE_CONFLICT",
+                "请先确定分组；已有清单需在声明页切换来源",
+            ));
+        }
+        let mut draft = current.draft.clone();
+        if external {
+            let mut one = draft.clone();
+            one.groups.clear();
+            one.candidates = vec![draft.candidates[index].clone()];
+            apphost::registry::sources::select_external(data, &mut one)?;
+            draft.candidates[index] = one.candidates.remove(0);
+            draft.schema_version = 2;
+        } else {
+            draft.candidates[index].external = None;
+        }
+        draft.candidates[index].selected = false;
+        let result = ScanResult {
+            token: Uuid::new_v4(),
+            editable: current.editable.clone(),
+            draft,
+        };
+        bounded(&result.draft)?;
+        *buffer = Some(result.clone());
+        Ok(result)
+    }
     fn read_candidate(&self, token: Uuid, index: usize) -> Result<String> {
         let buffer = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let current = buffer
@@ -174,6 +215,20 @@ pub async fn desktop_group(
     tauri::async_runtime::spawn_blocking(move || buffer.group(token, index, merge))
         .await
         .map_err(join_error)?
+}
+#[tauri::command]
+pub async fn desktop_candidate_external(
+    buffer: tauri::State<'_, DraftBuffer>,
+    token: Uuid,
+    index: usize,
+    external: bool,
+) -> Result<ScanResult> {
+    let buffer = buffer.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        buffer.external(&apphost::paths::data_dir(None)?, token, index, external)
+    })
+    .await
+    .map_err(join_error)?
 }
 #[tauri::command]
 pub async fn desktop_candidate_read(
@@ -355,6 +410,31 @@ mod tests {
         Uuid::parse_str(result["completed"][0]["installation_id"].as_str().unwrap()).unwrap()
     }
     #[test]
+    fn external_candidate_choice_rotates_token_and_preserves_project_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("data");
+        let root = temp.path().join("project");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"name":"test","scripts":{"dev":"vite --port 5173"}}"#,
+        )
+        .unwrap();
+        let buffer = DraftBuffer::default();
+        let scanned = buffer.replace(apphost::scan(&root, 0).unwrap()).unwrap();
+        let external = buffer.external(&data, scanned.token, 0, true).unwrap();
+        assert_ne!(external.token, scanned.token);
+        assert!(external.draft.candidates[0].external.is_some());
+        assert!(buffer.take(scanned.token, &[0]).is_err());
+        assert!(!data.exists());
+        assert!(!root.join("apphost.toml").exists());
+        let mut draft = buffer.take(external.token, &[0]).unwrap();
+        draft.candidates[0].selected = true;
+        let result = import(&data, draft).unwrap();
+        assert_eq!(result["completed"].as_array().unwrap().len(), 1);
+        assert!(!root.join("apphost.toml").exists());
+    }
+    #[test]
     fn scan_is_read_only_import_preserves_existing_bytes_and_receipts_exclude_env() {
         let (_temp, data, root, draft, text) = fixture();
         assert!(!data.exists());
@@ -485,4 +565,61 @@ mod tests {
         );
         assert!(buffer.take(decided.token, &[0]).is_ok());
     }
+}
+
+#[tauri::command]
+pub async fn desktop_manifest_switch_review(
+    installation_id: Uuid,
+    target_source: apphost::registry::sources::ManifestSource,
+) -> Result<Value> {
+    tauri::async_runtime::spawn_blocking(move || {
+        apphost::registry::sources::review_switch(
+            &apphost::paths::data_dir(None)?,
+            installation_id,
+            target_source,
+        )
+    })
+    .await
+    .map_err(join_error)?
+}
+#[tauri::command]
+pub async fn desktop_manifest_switch(
+    state: tauri::State<'_, crate::runtime::Bridge>,
+    installation_id: Uuid,
+    request: apphost::registry::sources::SwitchRequest,
+) -> Result<Value> {
+    let lock = state.connecting.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let data = apphost::paths::data_dir(None)?;
+        apphost::registry::sources::preflight_switch(&data, installation_id, &request)?;
+        let params = json!({"installation_id":installation_id,"switch":request});
+        if cfg!(target_os = "macos") {
+            match apphost::daemon::call(&data, "manifest-switch", params.clone(), false) {
+                Ok(v) => return Ok(crate::management::receipt(installation_id, &v)),
+                Err(e) if e.code == "DAEMON_UNAVAILABLE" => {}
+                Err(e) => return Err(e),
+            }
+            if data
+                .join("runtime")
+                .join(format!("{installation_id}.json"))
+                .try_exists()
+                .map_err(|e| Error::new("IO_ERROR", e.to_string()))?
+            {
+                return crate::runtime::explicit_call(&data, "manifest-switch", params, &lock)
+                    .map(|v| crate::management::receipt(installation_id, &v));
+            }
+        }
+        let result =
+            apphost::registry::sources::switch(&data, installation_id, &request, Actor::Human)
+                .map(|v| crate::management::receipt(installation_id, &v));
+        apphost::journal::record_result(
+            &data,
+            "manifest-switch",
+            Actor::Human,
+            Some(installation_id),
+            result,
+        )
+    })
+    .await
+    .map_err(join_error)?
 }

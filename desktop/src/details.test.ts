@@ -3,7 +3,7 @@ import { effectScope } from 'vue';
 import { flushPromises, mount } from '@vue/test-utils';
 import { describe, expect, it, vi } from 'vitest';
 const { invoke } = vi.hoisted(() => ({invoke:vi.fn()}));
-vi.mock('@tauri-apps/api/core', () => ({invoke}));
+vi.mock('@tauri-apps/api/core', () => ({invoke,Channel:class {onmessage?: (event:unknown) => void}}));
 import { useDetailRead } from './useDetailRead';
 import { logEntries, logWarnings, type LogResult } from './logs';
 import { commandText } from './diagnostics';
@@ -68,5 +68,33 @@ describe('bounded detail reads', () => {
   });
   it('quotes arbitrary suggested argv as data without shell evaluation', () => {
     expect(commandText(['tool','$(touch x)',"a'b"])).toBe("tool '$(touch x)' 'a'\\''b'");
+  });
+});
+
+describe('failure evidence and explicit actions', () => {
+  const report = () => ({failure:{failure_id:'f',at_ms:1,gaps:[],details:{operation_error:{details:{port:3000,installation_id:'owner',ownership:{owners:[{pid:123,name:'node'}],incomplete:false}}},services:[{name:'web',observed_listeners:{ports:[5174],incomplete:true}}]}},records:[{failure_id:'old',at_ms:0,code:'PORT_IN_USE'}],history:{},changes_since_success:{available:true,changes:[{field:'branch',before:'main',after:'work'}]},advice:{title:'端口占用',code:'PORT_IN_USE',evidence:{rule_id:'preflight'},actions:[{id:'stop_owner_and_start',title:'停止占用应用并启动',primary:true,argv:[]}]}});
+  it('shows evidence, dispatches the failure-bound action, and only suggests retry on cleared', async () => {
+    let channel:any;
+    invoke.mockReset().mockImplementation(async (cmd:string,args:any) => { if (cmd === 'desktop_condition_watch') {channel=args.channel; return;} return report(); });
+    const panel = mount(FailurePanel,{props:{installationId:'app',canRetry:true,apps:[{installation_id:'owner',label:'Another App'}]}}); await flushPromises();
+    expect(panel.text()).toContain('Another App'); expect(panel.text()).toContain('PID 123'); expect(panel.text()).toContain('5174'); expect(panel.text()).toContain('main → work');
+    await panel.find('button.primary').trigger('click'); expect(panel.emitted('owner')).toEqual([['f']]);
+    channel.onmessage({data:{state:'cleared',failure_id:'f'}}); await flushPromises();
+    expect(panel.text()).toContain('可以重试'); expect(panel.emitted('retry')).toBeUndefined();
+    panel.unmount(); expect(invoke.mock.calls.some(c => c[0] === 'desktop_condition_unwatch')).toBe(true);
+  });
+  it('disables destructive advice for older evidence and cancels the current condition watch', async () => {
+    invoke.mockReset().mockResolvedValue(report());
+    const panel = mount(FailurePanel,{props:{installationId:'app',canRetry:true}}); await flushPromises();
+    await panel.find('select').setValue('old'); await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('desktop_failure',{installationId:'app',failureId:'old'});
+    expect(panel.find('button.primary').attributes('disabled')).toBeDefined();
+    expect(invoke.mock.calls.filter(c => c[0] === 'desktop_condition_watch')).toHaveLength(1); panel.unmount();
+  });
+  it('routes missing source to desktop registration management', async () => {
+    const value = report(); value.advice.code = 'SOURCE_MISSING'; value.advice.actions[0]!.id = 'relink';
+    invoke.mockReset().mockResolvedValue(value);
+    const panel = mount(FailurePanel,{props:{installationId:'app',canRetry:false}}); await flushPromises();
+    await panel.find('button.primary').trigger('click'); expect(panel.emitted('relink')).toHaveLength(1); panel.unmount();
   });
 });

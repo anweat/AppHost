@@ -263,15 +263,27 @@ CLI `journal [--cursor <event_id>] [--limit <1..200>] [--json]` 和同名 RPC �
 
 桌面工程放在 `desktop/`，与根目录 CLI 共用核心库和数据目录解析规则：显式目录优先，其次 APPHOST_DATA_DIR，再使用现有平台默认路径。WebView 不接受任意数据目录、任意文件读取或任意 daemon 方法名；系统操作由具名 Rust command 承接。构建锁定 npm 与 Cargo 依赖；开发服务只绑定回环地址，端口固定且被占用时报错。
 
-桌面包通过 Tauri externalBin 携带同次构建的独立 `apphost`，运行时只从桌面可执行文件相邻位置解析，不接受 WebView 路径或 PATH 搜索结果。`desktop_connect()` 是显式的后台连接/拉起操作，使用既有单例握手和启动审计；只读 snapshot/watch 不拉起 daemon。关闭 UI 只释放观察连接，不停止 daemon、采集器或 App。Windows 仍返回明确的平台不支持结果，实际运行支持沿 G3 决策实施。
+桌面包通过 Tauri externalBin 携带同次构建的独立 `apphost`，运行时只从桌面可执行文件相邻位置解析，不接受 WebView 路径或 PATH 搜索结果。`desktop_connect()` 是显式的后台连接/拉起操作，使用既有单例握手和启动审计；只读 snapshot/watch 不拉起 daemon。关闭 UI 只释放观察连接，不停止 daemon、采集器或 App。Windows 的实际运行、系统浏览器打开及系统终端打开仍返回明确的平台不支持结果，沿 G3 决策实施。
 
-`desktop_action(action, installation_id?)` 只接受 start / stop / restart / stop-all / resume-wake；返回原操作回执，界面继续跟踪对应 operation_id 的快照，不自动重发超时的写请求。`desktop_watch(channel)` 每个桌面视图使用一个只读订阅，Rust 只向 WebView 推送 connected / changed 通知，收到后合并读取快照；初始订阅自带快照游标，过期或断连要求重新取得快照。重载或显式取消通过 `desktop_unwatch()` 释放旧订阅，空闲读每 250 ms 检查取消，原有帧期限不延长。
+`desktop_action(action, installation_id?, failure_id?)` 只接受 start / stop / restart / stop-all / resume-wake / stop-owner-and-start；显式操作可通过打包 CLI 拉起 daemon，启动审计沿用核心。stop-owner-and-start 以 installation_id 与 failure_id 绑定最近一次失败，Rust 从核心建议提取占用实例，daemon 再核验身份与监听归属；不信任 WebView 提交的占用者身份。返回原操作回执，界面继续跟踪对应 operation_id 的快照，不自动重发超时的写请求。`desktop_watch(channel)` 每个桌面视图使用一个只读订阅，Rust 只向 WebView 推送 connected / changed 通知，收到后合并读取快照；初始订阅自带快照游标，过期或断连要求重新取得快照。重载或显式取消通过 `desktop_unwatch()` 释放旧订阅，空闲读每 250 ms 检查取消，原有帧期限不延长。
 
 快照补充 operation_id、operation_done、脱离原始 details 的 operation_error.code/message、是否有浏览器入口及自动唤醒暂停标志。父目录只提供默认展示分组和名称，不创建后台分组。`desktop_open(installation_id, instance_id, operation_id)` 重新核验实时的同一操作/实例已 RUNNING 且服务存活就绪，随后打开核心生成的稳定 URL，不接受任意 URL。自动打开只绑定本次显式启动意图，消费一次后删除；停止、Stop All、断连或实例变更取消该意图，迟到回执不得恢复它。
 
-`desktop_preferences()` 只读 `ui.json`；外观结构 `{schema_version:1, theme:system|light|dark}`，缺省跟随系统。`desktop_theme(theme)` 原子保存主题，损坏或不支持的文件不覆盖；不保存运行状态。颜色和尺寸规则沿用原型：停止为中性底、存活进程填充项目身份色，故障色仅用于角标和提示；磁贴随画布高度计算 1–3 行、窄窗 96–120px / 常规窗 104–148px。
+`desktop_preferences()` 只读 `ui.json`；外观结构包含 `{schema_version:1, theme:system|light|dark, groups, collapsed, show_recent, last_used, search}`；旧文件缺少新增字段时使用默认值，主题缺省跟随系统。`desktop_theme(theme)` 原子保存主题，损坏或不支持的文件不覆盖；不保存运行状态。`desktop_ui_edit(change)` 以同一文件锁更新单项外观设置，保留其他设置：search、recent、create-group、rename-group、dissolve-group、move、collapse、touch。自定义分组最多 128 个、名称最多 64 字符、总成员最多 1024 个且单一归属；折叠键最多 256 个，最近使用时间最多保留 1024 个安装。分组成员按登记顺序展示，移动只改变归属，解散回到默认父目录。最近使用组可关闭，登记数 ≥ 12 时最多显示 6 个图标，该区域以外不按时间重排。搜索设置为回车默认 primary/details、路径匹配开关、操作结果开关；它们只影响界面。颜色和尺寸规则沿用原型：停止为中性底、存活进程填充项目身份色，故障色仅用于角标和提示；磁贴随画布高度计算 1–3 行、窄窗 96–120px / 常规窗 104–148px。
 
-`desktop_snapshot()` 是只读观察接口，不创建目录或启动 daemon，返回 `{apps, live, automatic_wake_paused, read_at_ms, runtime_error}`。`apps` 按登记顺序排列，每项只包含 installation_id、project_id、label、path、group、group_label、registration_state、requires_confirmation、has_entry 与可选 runtime；runtime 仅包含实例 ID、安装 ID、operation_id/operation_done/operation_error、五态、失败代码、记录更新时间及服务 name/port/alive/ready。该列表接口不向 WebView 传递 confirmed_services、confirmed_manifest、env 或 launch_context。运行查询错误保留为 runtime_error，不把未知状态当作 STOPPED；已成功取得的历史记录保留其五态和更新时间。整个读取失败时前端保留上次成功结果、撤销 live 标识并显示读取错误。没有事件订阅的快照必须显示观察时间，不能宣称持续实时；显式刷新期间合并重复读取请求。
+`desktop_snapshot()` 是只读观察接口，不创建目录或启动 daemon，返回 `{apps, live, automatic_wake_paused, read_at_ms, runtime_error}`。`apps` 按登记顺序排列，每项只包含 installation_id、project_id、label、path、group、group_label、registration_state、requires_confirmation、has_entry 与可选 runtime；runtime 仅包含实例 ID、安装 ID、operation_id/operation_done/operation_error、五态、失败代码、记录更新时间、created_at_ms、可选 started_at_ms、management_uncertain 及服务 name/port/alive/ready/startup_timeout_ms。started_at_ms 与派发完成后的就绪计时起点一致，老记录缺失时不虚构期限；准备阶段显示准备启动。该列表接口不向 WebView 传递 confirmed_services、confirmed_manifest、env 或 launch_context。运行查询错误保留为 runtime_error，不把未知状态当作 STOPPED；已成功取得的历史记录保留其五态和更新时间。整个读取失败时前端保留上次成功结果、撤销 live 标识并显示读取错误。没有事件订阅的快照必须显示观察时间，不能宣称持续实时；显式刷新期间合并重复读取请求。
+
+`desktop_detach(installation_id)` 只解除登记，不删除项目；界面明确确认后提交。`desktop_relink(installation_id)` 通过原生目录选择器选取移动后的目录，核心核对项目身份、旧目录不存在及路径冲突；取消选择没有副作用。有实时 daemon 或持久化运行记录时走 stop-and-write 协调，必要时通过随包 CLI 拉起后台；纯登记离线修改不拉起后台。回执中的 operation_id 可通过只读 `desktop_operation` 核对完成与错误；未知结果不重发写操作。重新关联后保持停止，并复核新路径的启动声明。
+
+`desktop_failure(installation_id, failure_id?)` 可读取最近一次或指定历史现场；结果 `records` 返回留存范围内的失败引用（ID、时间、类别），不复制每条完整日志。历史现场的启动/停止占用者按钮不可用。`desktop_condition_watch(installation_id, failure_id, token, channel)` 只读订阅最近失败的端口条件，最多 60 秒；关闭或切换现场用 token 取消，下一次观察关闭连接。端口释放仅提示重试，不自动启动。`desktop_journal(cursor?)` 每页读取 50 条核心操作记录，不启动后台；记录按核心追加顺序展示。
+
+`desktop_icon(installation_id)` 只通过核心固定候选发现和摘要校验读取图标，最多 256 KiB；WebView 将返回的 MIME/字节渲染为 data URL，不接收任意本地文件路径，读取失败使用首字。多服务环按各服务 alive/ready 表示就绪程度，历史观察不显示实时绿色。
+
+后台与网关设置使用 `desktop_login_read/save`、`desktop_gateway_read/save`。登录开关需用户明确选择，不预填待提交选择；登记的可执行文件为打包 CLI，仅下次登录启动后台，不启动应用。网关只按用户指定端口保存，运行中绑定冲突保持旧配置，不自动换端口；离线保存不拉起后台。
+
+`desktop_candidate_external(token,index,external)` 只调整新推断候选的存储位置并轮换草稿 token，不写文件、不覆盖已有来源；最终导入才写入项目或 AppHost 管理目录。`desktop_manifest_switch_review(installation_id,target_source)` 返回当前/目标文本、路径、摘要、revision 与完整目标声明；`desktop_manifest_switch(installation_id,request)` 在显式确认后复核基线，必要时停止实例再切换，原文件保留。声明编辑展示有界差异预览及完整文本、命令参数数组、工作目录和端口摘要；失败编辑入口按服务及相关字段定位，不把日志行号误当作 TOML 行号。
+
+顶栏活动区按 installation_id 与 operation_id 跟踪回执；单应用结果在磁贴旁短暂显示，完整记录通过操作记录页读取。Stop All 聚合逐项结果，区分已停止、失败、取消启动及身份不确定的遗留进程。超过 5 秒的启动显示已等待时间及各服务有效期限；不增加前端运行状态机。分组启动尚未派发的成员被 Stop All 取消；成员有更新的显式操作时跳过旧批次意图。
 
 桌面反馈（冻结稿 5.9、10.4）需要接口提供以下数据，前端只做比较和展示，不自行推断或累计：
 

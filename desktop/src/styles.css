@@ -206,3 +206,43 @@ kbd{font:11px system-ui;color:var(--muted)}
 .settings-check { margin-top: 28px; padding-top: 24px; border-top: 1px solid var(--line); }
 .check-service { display: grid; grid-template-columns: 80px minmax(0,1fr); gap: 6px 12px; font-size: 12px; }
 .check-service dt { color: var(--muted); }.check-service dd { margin: 0; overflow-wrap: anywhere; }
+
+.journal-list { list-style: none; padding: 0; }
+.journal-list li { padding: 14px 0; border-bottom: 1px solid var(--line); }
+.journal-list p { margin: 5px 0; overflow-wrap: anywhere; }
+.group-tools { display:inline-flex; opacity:0; margin-left:6px; }
+.group:hover .group-tools,.group:focus-within .group-tools { opacity:1; }
+.group-control { border:0; background:transparent; padding:0 5px; color:inherit; }
+.folder-tile { width:var(--tile); height:var(--tile); border:1px solid var(--line); border-radius:8px; background:var(--surface); color:inherit; }
+.folder-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:5px; padding:12px; }
+.folder-grid i { width:14px; height:14px; background:var(--line); border-radius:3px; }
+.folder-grid i[data-state=RUNNING] { background:var(--accent); }
+.folder-grid i[data-state=FAILED] { background:#dc6e60; }
+.group-add { align-self:flex-start; margin-top:40px; white-space:nowrap; }
+.tile-menu { position:fixed; z-index:30; width:220px; padding:8px; background:var(--surface); color:var(--ink); border:1px solid var(--line); box-shadow:0 8px 24px #0003; border-radius:8px; }
+.tile-menu button,.tile-menu label { display:block; width:100%; text-align:left; padding:8px; }
+.tile-menu select { max-width:100%; }
+.recent { --tile:76px; }
+.recent .tile-name { display:none; }
+.service-ring { position:absolute; width:68%; height:68%; left:16%; top:5%; pointer-events:none; }
+.service-ring circle { stroke:var(--line); stroke-width:3px; }
+.service-ring .ready { stroke:var(--accent); }
+.service-ring .waiting { stroke:#b8a572; }
+.service-ring .failed { stroke:#dc6e60; }
+.search-actions { position:absolute; z-index:15; top:8px; left:20px; max-height:50%; overflow:auto; background:var(--surface); border:1px solid var(--line); padding:8px; border-radius:8px; }
+.search-actions button { margin:3px; }
+
+.tile-main .service-ring { width:56px; height:56px; top:7px; left:7px; }
+.badge img { width:100%; height:100%; object-fit:contain; border-radius:inherit; }
+.tile-feedback { position:absolute; z-index:10; left:0; top:calc(100% + 3px); width:220px; padding:8px 10px; background:var(--tip-bg); color:var(--tip-ink); border-radius:6px; font-size:12px; box-shadow:var(--pop-shadow); }
+.tile-feedback button { background:transparent; color:inherit; border:0; padding:0 4px; float:right; }
+.recent .tile-main { padding:0; justify-content:center; align-items:center; }
+.recent .tile-main .service-ring { top:calc(50% - 28px); left:calc(50% - 28px); }
+
+.tile:has(.tile-feedback) { overflow:visible; z-index:12; }
+.tile:has(.tile-feedback) .tile-main { border-radius:10px; }
+.activity-panel { position:absolute; z-index:40; top:calc(100% + 8px); right:16px; width:380px; max-width:calc(100vw - 32px); max-height:60vh; overflow:auto; padding:16px; background:var(--surface); border:1px solid var(--line); border-radius:8px; box-shadow:var(--pop-shadow); }
+.activity-panel p { margin:8px 0; overflow-wrap:anywhere; }
+
+/* Reserve six recent slots so usage changes never shift the ordinary groups. */
+.recent .group-grid { grid-template-columns:repeat(2,76px); grid-template-rows:repeat(3,76px); grid-auto-flow:row; }

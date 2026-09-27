@@ -1,12 +1,18 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import { declarationDiff, declarationSelection, type EditFocus } from '../manifestDiff';
+import ManifestSource from './ManifestSource.vue';
+import { commandText } from '../diagnostics';
 import type { AppEntry } from '../model';
 import { errorMessage } from '../model';
 import type { ManifestRead, ManifestReview, SaveReceipt } from '../registration';
-const props = defineProps<{app: AppEntry; live: boolean}>();
+const props = defineProps<{app: AppEntry; live: boolean; focus?:EditFocus}>();
 const emit = defineEmits<{changed: []; dirty: [value: boolean]}>();
 const source = ref<ManifestRead>(), text = ref(''), review = ref<ManifestReview>(), busy = ref(false), message = ref('');
+const editor = ref<HTMLTextAreaElement>(), sourceBusy = ref(false);
+async function focusRelated() { if (!props.focus) return; await nextTick(); const selection=declarationSelection(text.value,props.focus); editor.value?.focus(); editor.value?.setSelectionRange(selection.start,selection.end); }
+watch(() => props.focus, focusRelated);
 const pending = ref<string>(), reloadPrompt = ref(false);
 let disposed = false;
 onUnmounted(() => { disposed = true; });
@@ -18,7 +24,7 @@ async function read() {
   try {
     const result = await invoke<ManifestRead>('desktop_manifest_read', {installationId:props.app.installation_id});
     if (disposed) return false;
-    source.value = result; text.value = result.text; review.value = undefined; pending.value = undefined; return true;
+    source.value = result; text.value = result.text; review.value = undefined; pending.value = undefined; void focusRelated(); return true;
   } catch (error) { message.value = `${errorMessage(error).code} · ${errorMessage(error).message}`; return false; }
   finally { busy.value = false; }
 }
@@ -65,24 +71,27 @@ onMounted(read);
 </script>
 <template>
   <section aria-label="启动声明" :aria-busy="busy">
-    <div class="panel-toolbar"><strong>启动声明</strong><button :disabled="busy || !!pending" @click="dirty ? reloadPrompt = true : read()">重新读取</button></div>
+    <div class="panel-toolbar"><strong>启动声明</strong><button :disabled="busy || !!pending || sourceBusy" @click="dirty ? reloadPrompt = true : read()">重新读取</button></div>
     <p v-if="message" class="notice" role="status">{{ message }}</p>
     <div v-if="reloadPrompt" class="notice">丢弃未保存的编辑并重新读取？<div class="row-actions"><button @click="read">丢弃并读取</button><button @click="reloadPrompt = false">继续编辑</button></div></div>
     <template v-if="source">
       <button v-if="pending" :disabled="busy" @click="reloadPrompt = true">结束等待，重新读取</button>
       <p class="muted path-text">{{ source.manifest_path }}</p>
-      <label class="editor-label">清单内容<textarea v-model="text" class="manifest-editor" :readonly="busy || !!pending" spellcheck="false" aria-label="清单内容"/></label>
+      <ManifestSource v-if="source.manifest_source" :installation-id="app.installation_id" :source="source.manifest_source" :disabled="dirty || busy || !!pending" @busy="sourceBusy=$event" @changed="read(); emit('changed')"/>
+      <label class="editor-label">清单内容<textarea ref="editor" v-model="text" class="manifest-editor" :readonly="busy || !!pending || sourceBusy" spellcheck="false" aria-label="清单内容"/></label>
       <p v-if="pending" class="muted">{{ live ? '等待操作完成，可刷新应用状态核对。' : '后台未连接，结果尚未确认。重新连接后核对，不会重复提交。' }}</p>
       <template v-if="review">
         <h3>确认变更</h3>
         <details><summary>上次确认的启动声明</summary><pre>{{ JSON.stringify(review.previous_confirmation.manifest || review.previous_confirmation.services, null, 2) }}</pre></details>
         <details><summary>当前文件</summary><pre>{{ review.before_text }}</pre></details>
-        <p class="muted">本次保存内容</p><pre class="declaration-preview">{{ review.after_text }}</pre>
+        <h3>变更差异</h3><pre class="declaration-preview">{{ declarationDiff(review.before_text, review.after_text) }}</pre>
+        <h3>执行摘要</h3><div v-for="service in review.manifest?.services" :key="service.name"><strong>{{ service.name }}</strong><pre>{{ commandText(service.command) }}</pre><p class="muted">工作目录：{{ app.path }}/{{ service.cwd || '.' }} · 端口：{{ service.port || '未声明' }}</p><details v-if="Object.keys(service.env || {}).length"><summary>环境变量</summary><pre>{{ JSON.stringify(service.env, null, 2) }}</pre></details></div>
+        <details><summary>本次完整声明与入口</summary><pre class="declaration-preview">{{ review.after_text }}</pre></details>
         <p v-for="(warning,i) in review.warnings" :key="i" class="notice">{{ warning.message }}</p>
         <p class="muted">运行中的应用会先停止；保存后保持停止，需手动启动。</p>
-        <button class="primary" :disabled="busy || !!pending || (!!app.runtime && !live)" @click="save">确认并保存</button>
+        <button class="primary" :disabled="busy || !!pending || sourceBusy || (!!app.runtime && !live)" @click="save">保存并确认启动声明</button>
       </template>
-      <button v-else class="primary" :disabled="busy || !!pending" @click="inspect">复核启动声明</button>
+      <button v-else class="primary" :disabled="busy || !!pending || sourceBusy" @click="inspect">复核启动声明</button>
       <p v-if="app.runtime && !live" class="muted">保存前请先连接后台。</p>
     </template>
   </section>

@@ -82,6 +82,31 @@ pub async fn desktop_retention_save(days: u16, max_mib: u32) -> Result<Value> {
     blocking(move || save_retention(&apphost::paths::data_dir(None)?, days, max_mib)).await
 }
 
+#[tauri::command]
+pub async fn desktop_login_read() -> Result<Value> {
+    blocking(|| apphost::login::show(&apphost::paths::data_dir(None)?)).await
+}
+#[tauri::command]
+pub async fn desktop_login_save(enabled: bool) -> Result<Value> {
+    blocking(move || {
+        apphost::login::set_executable(
+            &apphost::paths::data_dir(None)?,
+            &crate::runtime::cli_path()?,
+            enabled,
+            Actor::Human,
+        )
+    })
+    .await
+}
+#[tauri::command]
+pub async fn desktop_gateway_read() -> Result<apphost::gateway::Config> {
+    blocking(|| apphost::gateway::config(&apphost::paths::data_dir(None)?)).await
+}
+#[tauri::command]
+pub async fn desktop_gateway_save(port: u16) -> Result<Value> {
+    blocking(move || apphost::gateway::set_port(&apphost::paths::data_dir(None)?, port)).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

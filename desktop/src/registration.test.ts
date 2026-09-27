@@ -41,23 +41,23 @@ describe('manifest editor boundaries', () => {
     invoke.mockResolvedValueOnce(source).mockResolvedValueOnce(review);
     const panel = mount(ManifestEditor,{props:{app:app(),live:false}}); await flushPromises();
     await panel.find('textarea').setValue('edited'); await button(panel,'复核').trigger('click'); await flushPromises();
-    expect(button(panel,'确认并保存')).toBeDefined();
+    expect(button(panel,'保存并确认启动声明')).toBeDefined();
     await panel.find('textarea').setValue('edited again');
-    expect(button(panel,'确认并保存')).toBeUndefined(); expect(panel.emitted('dirty')?.at(-1)).toEqual([true]); panel.unmount();
+    expect(button(panel,'保存并确认启动声明')).toBeUndefined(); expect(panel.emitted('dirty')?.at(-1)).toEqual([true]); panel.unmount();
   });
   it('preserves the buffer when disk changes before review', async () => {
     invoke.mockResolvedValueOnce(source).mockResolvedValueOnce({...review,base_sha256:'external'});
     const panel = mount(ManifestEditor,{props:{app:app(),live:false}}); await flushPromises();
     await panel.find('textarea').setValue('edited'); await button(panel,'复核').trigger('click'); await flushPromises();
     expect(panel.text()).toContain('EDIT_CONFLICT'); expect(panel.find('textarea').element.value).toBe('edited');
-    expect(button(panel,'确认并保存')).toBeUndefined(); panel.unmount();
+    expect(button(panel,'保存并确认启动声明')).toBeUndefined(); panel.unmount();
   });
   it('never treats an accepted operation as saved, and preserves edits on stop failure', async () => {
     invoke.mockResolvedValueOnce(source).mockResolvedValueOnce(review).mockResolvedValueOnce({operation_id:'save',operation_done:false});
     const item = app(); item.runtime = {installation_id:'app',instance_id:'instance',operation_id:'old',status:{state:'RUNNING',failure:null},services:[],updated_at_ms:1};
     const panel = mount(ManifestEditor,{props:{app:item,live:true}}); await flushPromises();
     await panel.find('textarea').setValue('edited'); await button(panel,'复核').trigger('click'); await flushPromises();
-    await button(panel,'确认并保存').trigger('click'); await flushPromises();
+    await button(panel,'保存并确认启动声明').trigger('click'); await flushPromises();
     expect(panel.text()).toContain('等待后台'); expect(panel.text()).not.toContain('已保存并确认');
     await panel.setProps({live:false}); expect(panel.text()).toContain('结果尚未确认');
     await panel.setProps({live:true,app:{...item,runtime:{...item.runtime!,operation_id:'save',operation_done:true,operation_error:{code:'STOP_TIMEOUT',message:'stop failed'}}}}); await flushPromises();
@@ -68,9 +68,9 @@ describe('manifest editor boundaries', () => {
     invoke.mockResolvedValueOnce(source).mockResolvedValueOnce(review).mockRejectedValueOnce({code:'EDIT_CONFLICT',message:'external write'});
     const panel = mount(ManifestEditor,{props:{app:app(),live:false}}); await flushPromises();
     await panel.find('textarea').setValue('edited'); await button(panel,'复核').trigger('click'); await flushPromises();
-    await button(panel,'确认并保存').trigger('click'); await flushPromises();
+    await button(panel,'保存并确认启动声明').trigger('click'); await flushPromises();
     expect(panel.find('textarea').element.value).toBe('edited'); expect(panel.text()).toContain('EDIT_CONFLICT');
-    expect(button(panel,'确认并保存')).toBeUndefined(); expect(panel.emitted('changed')).toHaveLength(1); panel.unmount();
+    expect(button(panel,'保存并确认启动声明')).toBeUndefined(); expect(panel.emitted('changed')).toHaveLength(1); panel.unmount();
   });
 });
 
@@ -81,14 +81,14 @@ describe('late responses and completion', () => {
     const panel = mount(ManifestEditor,{props:{app:app(),live:false}}); await flushPromises();
     await panel.find('textarea').setValue('edited'); await button(panel,'复核').trigger('click');
     await panel.find('textarea').setValue('new buffer'); resolve(review); await flushPromises();
-    expect(button(panel,'确认并保存')).toBeUndefined(); expect(panel.find('textarea').element.value).toBe('new buffer'); panel.unmount();
+    expect(button(panel,'保存并确认启动声明')).toBeUndefined(); expect(panel.find('textarea').element.value).toBe('new buffer'); panel.unmount();
   });
   it('reads the saved source only after matching completion and clears stale success on further edits', async () => {
     invoke.mockResolvedValueOnce(source).mockResolvedValueOnce(review).mockResolvedValueOnce({operation_id:'save',operation_done:false}).mockResolvedValueOnce({...source,revision:2,text:'edited'});
     const item = app(); item.runtime = {installation_id:'app',instance_id:'instance',operation_id:'old',status:{state:'RUNNING',failure:null},services:[],updated_at_ms:1};
     const panel = mount(ManifestEditor,{props:{app:item,live:true}}); await flushPromises();
     await panel.find('textarea').setValue('edited'); await button(panel,'复核').trigger('click'); await flushPromises();
-    await button(panel,'确认并保存').trigger('click'); await flushPromises();
+    await button(panel,'保存并确认启动声明').trigger('click'); await flushPromises();
     await panel.setProps({app:{...item,runtime:{...item.runtime!,operation_done:true}}}); await flushPromises();
     expect(invoke.mock.calls.filter(c => c[0] === 'desktop_manifest_read')).toHaveLength(1);
     await panel.setProps({app:{...item,runtime:{...item.runtime!,operation_id:'save',operation_done:true,status:{state:'STOPPED',failure:null}}}}); await flushPromises();
@@ -127,5 +127,14 @@ describe('incomplete desktop imports', () => {
     expect(panel.find('[aria-label="关闭添加应用"]').attributes('disabled')).toBeDefined();
     await panel.trigger('keydown',{key:'Escape'}); expect(panel.emitted('close')).toBeUndefined();
     await button(panel,'放弃编辑').trigger('click'); expect(panel.find('textarea').exists()).toBe(false); panel.unmount();
+  });
+});
+
+describe('declaration presentation', () => {
+  it('shows a bounded line diff and parsed commands before confirming', async () => {
+    invoke.mockResolvedValueOnce(source).mockResolvedValueOnce({...review,before_text:'same\nport = 1\nend',after_text:'same\nport = 2\nend',manifest:{services:[{name:'web',command:['npm','run','dev'],cwd:'web',port:2}]}});
+    const panel=mount(ManifestEditor,{props:{app:app(),live:false}}); await flushPromises();
+    await button(panel,'复核').trigger('click'); await flushPromises();
+    expect(panel.text()).toContain('− port = 1'); expect(panel.text()).toContain('+ port = 2'); expect(panel.text()).toContain('npm run dev'); expect(panel.text()).toContain('端口：2'); panel.unmount();
   });
 });

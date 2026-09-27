@@ -46,7 +46,8 @@ describe('desktop observations', () => {
     expect(wrapper.text()).toContain(app.label);
     expect(wrapper.attributes('data-live')).toBe('true');
     await wrapper.find('button').trigger('keydown', { key:'F10', shiftKey:true });
-    expect(wrapper.emitted('details')).toEqual([['installation']]);
+    expect(wrapper.emitted('menu')?.[0]?.[0]).toBe('installation');
+    expect(wrapper.emitted('details')).toBeUndefined();
     await wrapper.setProps({ snapshot: { ...snapshot, live:false } });
     expect(wrapper.attributes('data-live')).toBe('false');
   });
