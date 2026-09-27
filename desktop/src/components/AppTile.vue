@@ -9,6 +9,16 @@ import { runtimeBlocked, hasLiveServices, identityHue, stateLabel, tileState, ty
 const props = defineProps<{ app: AppEntry; snapshot: Snapshot; feedback?:Feedback }>();
 defineEmits<{ details: [id: string]; primary: [id: string]; menu: [id:string,event:MouseEvent|KeyboardEvent]; dismiss:[id:string]; feedbackAction:[id:string,item:Feedback] }>();
 const icon=ref(''); let disposed=false;
+// Follow the prototype's rounded-square outline, independent of the icon content.
+const serviceRing = computed(() => {
+  const runtime=props.app.runtime;
+  if(!props.snapshot.live || !runtime || runtime.services.length<2 || runtime.status.state==='STOPPED') return '';
+  const step=360/runtime.services.length, gap=Math.min(12,step/3);
+  return `conic-gradient(${runtime.services.map((service,index)=>{
+    const color=service.alive ? service.ready ? 'var(--seg-on)' : 'var(--seg-wait)' : runtime.status.state==='FAILED' ? 'var(--fail)' : 'var(--seg-off)';
+    return `transparent ${index*step}deg ${index*step+gap/2}deg,${color} ${index*step+gap/2}deg ${(index+1)*step-gap/2}deg,transparent ${(index+1)*step-gap/2}deg ${(index+1)*step}deg`;
+  }).join(',')})`;
+});
 onUnmounted(()=>{disposed=true;});
 onMounted(async()=>{try {const value=await invoke<{mime:string;bytes:number[]}|null>('desktop_icon',{installationId:props.app.installation_id});
   if(value && !disposed){let binary='';for(let i=0;i<value.bytes.length;i+=8192)binary+=String.fromCharCode(...value.bytes.slice(i,i+8192));icon.value=`data:${value.mime};base64,${btoa(binary)}`;}
@@ -27,8 +37,7 @@ const label = computed(() => [props.app.label, stateLabel(props.app, props.snaps
       @click="$emit('primary', app.installation_id)"
       @contextmenu.prevent.stop="$emit('menu', app.installation_id, $event)"
       @keydown.shift.f10.prevent.stop="$emit('menu', app.installation_id, $event)">
-      <svg v-if="app.runtime && app.runtime.services.length > 1" class="service-ring" viewBox="0 0 100 100" aria-hidden="true"><circle v-for="(service,index) in app.runtime.services" :key="service.name" cx="50" cy="50" r="46" fill="none" pathLength="100" :stroke-dasharray="`${Math.max(1,100/app.runtime.services.length-3)} ${100-Math.max(1,100/app.runtime.services.length-3)}`" :stroke-dashoffset="-index*100/app.runtime.services.length" :class="{ready:snapshot.live && service.alive && service.ready,waiting:snapshot.live && service.alive && !service.ready,failed:app.runtime.status.state==='FAILED' && !service.alive}"/></svg>
-      <span class="badge" aria-hidden="true"><img v-if="icon" :src="icon" alt="" @error="icon=''"><b v-else class="mono">{{ [...app.label.trim()][0]?.toUpperCase() || '?' }}</b></span>
+      <span class="badge" aria-hidden="true"><img v-if="icon" :src="icon" alt="" @error="icon=''"><b v-else class="mono">{{ [...app.label.trim()][0]?.toUpperCase() || '?' }}</b><i v-if="serviceRing" class="service-ring" :style="{background:serviceRing}"></i></span>
       <span class="tile-name">{{ app.label }}</span>
       <span class="tile-flag" aria-hidden="true"></span><span class="tile-dot" aria-hidden="true"></span>
       <span v-if="!['STARTING', 'STOPPING'].includes(app.runtime?.status.state || '')" class="tile-hint" aria-hidden="true"><AppIcon :name="!snapshot.live || app.requires_confirmation || app.registration_state === 'SOURCE_MISSING' ? 'info' : app.runtime?.status.state === 'RUNNING' ? app.has_entry ? 'arrow' : 'info' : 'play'"/></span>

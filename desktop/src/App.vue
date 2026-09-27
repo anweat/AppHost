@@ -4,6 +4,7 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 import ImportPanel from './components/ImportPanel.vue';
 import TileBoard from './components/TileBoard.vue';
 import AppIcon from './components/AppIcon.vue';
+import SearchPalette from './components/SearchPalette.vue';
 import ManagementPanel from './components/ManagementPanel.vue';
 import AppDetails from './components/AppDetails.vue';
 import FirstRunLogin from './components/FirstRunLogin.vue';
@@ -70,6 +71,7 @@ const startups=computed(()=>displayed.value?.live ? displayed.value.apps.filter(
 watch(()=>startups.value.length, count=>{if(count)activityOpen.value=true;});
 const search = ref('');
 const searchInput = ref<HTMLInputElement>();
+const searchOpen=ref(false), searchActive=ref(0);
 const selectedId = ref<string | null>(null);
 const detailTab = ref('overview');
 const importing = ref(false), importBusy = ref(false), editorDirty = ref(false), discardPrompt = ref(false);
@@ -115,13 +117,76 @@ async function searchExecute(action:SearchAction, id:string) {
   else await details(id, action === 'details'?'overview':action);
   search.value='';
 }
-function searchEnter(event:KeyboardEvent) {
-  if(event.isComposing || event.keyCode===229) return;
-  const first=filtered.value[0]; if(!first)return;
-  event.preventDefault();
-  const normal=preferences.value.search.enter === 'details'?'details':'primary';
-  const action=results.value.action || (results.value.onlyActions ? results.value.actions[0]! : event.shiftKey ? normal === 'details'?'primary':'details' : normal);
-  void searchExecute(action,first.installation_id);
+type SearchOption={key:string;label:string;section:string;hint?:string;id?:string;action?:SearchAction;global?:string;disabled?:boolean};
+const actionNames:Record<SearchAction,string>={primary:'打开',start:'启动',stop:'停止',restart:'重启',logs:'日志',details:'详情',failure:'失败现场',manifest:'编辑声明'};
+const searchOptions=computed<SearchOption[]>(()=>{
+  const found=results.value, options:SearchOption[]=[];
+  const globalStop=/^(?:>\s*)?(?:stop all|全部停止|停止全部)$/i.test(search.value.trim());
+  const defaultAction=preferences.value.search.enter;
+  if(!found.onlyActions && !found.action && !globalStop) for(const app of found.ranked.slice(0,6)) options.push({key:'app:'+app.installation_id,label:app.label,section:'应用',hint:defaultAction==='details'?'查看详情':'启动 / 打开',id:app.installation_id,action:defaultAction});
+  const offerActions=found.showActions || (preferences.value.search.show_actions && !!search.value.trim() && found.ranked.length===1);
+  if(offerActions && !globalStop) for(const app of found.ranked.slice(0,6)) for(const action of found.actions) {
+    if(options.filter(o=>o.section==='操作').length>=7)break;
+    options.push({key:action+':'+app.installation_id,label:actionNames[action]+' '+app.label,section:'操作',id:app.installation_id,action,disabled:runtimeBlocked(displayed.value)&&['start','stop','restart'].includes(action)});
+  }
+  // Filters and app verbs constrain application results, never global commands.
+  if((preferences.value.search.show_actions || found.onlyActions) && (!found.action || globalStop) && !/(?:^|\s)(?:is|in|状态|组):/i.test(search.value)) {
+    const globals=[
+      {key:'add',label:'添加应用',terms:'添加 导入 新增 add import'},
+      {key:'groups',label:'新建与管理分组',terms:'分组 新建分组 group new group'},
+      ...(runtime.canStopAll.value ? [{key:'stop-all',label:'全部停止',terms:'全部停止 停止全部 stop all'}]:[]),
+      ...(displayed.value?.live && displayed.value.automatic_wake_paused ? [{key:'resume-wake',label:'恢复自动唤醒',terms:'恢复 唤醒 resume wake'}]:[]),
+      {key:'collapse',label:'折叠全部分组',terms:'折叠 collapse fold'},
+      {key:'expand',label:'展开全部分组',terms:'展开 expand unfold'},
+      {key:'theme',label:'切换深色 / 浅色',terms:'主题 外观 深色 浅色 theme dark light'},
+      {key:'applications',label:'应用管理',terms:'管理 应用 applications manage'},
+      {key:'journal',label:'操作记录',terms:'操作 记录 历史 journal history activity'},
+      {key:'environment',label:'运行环境',terms:'环境 设置 environment settings path'},
+      {key:'search',label:'搜索与操作索引设置',terms:'搜索 设置 search settings'},
+    ];
+    const text=globalStop ? search.value.trim().replace(/^>\s*/,'').toLocaleLowerCase():found.text;
+    for(const item of globals.filter(g=>!text || (g.label+' '+g.terms).toLocaleLowerCase().includes(text)).slice(0,found.onlyActions?11:5)) options.push({key:'global:'+item.key,label:item.label,section:'AppHost',global:item.key});
+  }
+  return options;
+});
+watch(search,()=>searchActive.value=0);
+watch(searchOptions, options=>{if(searchActive.value>=options.length)searchActive.value=0;});
+function searchFocus(){guard(()=>{view.value='home';searchOpen.value=true;});}
+function insertSearch(value:string){
+  const current=search.value.trimEnd().replace(/(?:^|\s)(?:is|in):$/,'').trimEnd();
+  search.value=value==='>'?'> ':current+(current?' ':'')+value;
+  searchOpen.value=true;searchInput.value?.focus();
+}
+async function searchPick(item:SearchOption, alternate=false) {
+  if(item.disabled)return;
+  const origin=document.activeElement as HTMLElement;
+  searchOpen.value=false;search.value='';
+  // Details owns focus transfer so closing it can return to the search field.
+  if(!item.id || !['details','logs','failure','manifest'].includes(item.action||''))searchInput.value?.blur();
+  if(item.id && item.action){await searchExecute(alternate && item.section==='应用' ? item.action==='details'?'primary':'details':item.action,item.id);if(selectedId.value)returnFocus=origin;return;}
+  const command=item.global;
+  if(command==='add')add();
+  else if(command==='stop-all' || command==='resume-wake'){activityOpen.value=true;await runtime.action(command);}
+  else if(command==='theme') {const dark=theme.value==='dark'||(theme.value==='system'&&window.matchMedia('(prefers-color-scheme:dark)').matches);await saveTheme(dark?'light':'dark');}
+  else if(command==='collapse'||command==='expand') {
+    const keys=new Set([...preferences.value.groups.map(g=>g.id),...(displayed.value?.apps||[]).map(a=>preferences.value.groups.find(g=>g.members.includes(a.installation_id))?.id||a.group||'apps')]);
+    for(const key of keys)await editPreference({kind:'collapse',key,collapsed:command==='collapse'});
+  } else if(command)guard(()=>manage(command));
+}
+function searchKeys(event:KeyboardEvent) {
+  if(event.isComposing || event.keyCode===229)return;
+  if(['ArrowDown','ArrowUp'].includes(event.key)) {
+    event.preventDefault();searchOpen.value=true;
+    const size=searchOptions.value.length;
+    if(size)searchActive.value=(searchActive.value+(event.key==='ArrowDown'?1:size-1))%size;
+    void nextTick(()=>document.getElementById('search-option-'+searchActive.value)?.scrollIntoView?.({block:'nearest'}));
+  } else if(event.key==='Enter') {
+    const item=searchOptions.value[searchActive.value];if(!item)return;
+    event.preventDefault();void searchPick(item,event.shiftKey);
+  } else if(event.key==='Escape') {
+    event.preventDefault();event.stopPropagation();
+    if(search.value)search.value='';else {searchOpen.value=false;searchInput.value?.blur();}
+  }
 }
 async function batch(kind:'start'|'stop', ids:string[]) {
   const epoch=runtime.intentEpoch(), versions=new Map(ids.map(id=>[id,runtime.intentVersion(id)]));
@@ -179,7 +244,7 @@ onUnmounted(() => { runtime.dispose(); clearInterval(clockTimer); window.removeE
       <button class="brand" aria-label="后台连接状态" :title="displayed?.live ? '后台已连接' : '后台未连接'" @click="connectionOpen = !connectionOpen">
         <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 64 64"><rect x="8" y="8" width="48" height="48" rx="15" fill="none" stroke="currentColor" stroke-width="5" pathLength="100" stroke-dasharray="9 18 73 0"/><circle class="link-dot" :class="{ off: !displayed?.live }" cx="51.6" cy="12.4" r="4.5"/><rect x="20" y="20" width="24" height="24" rx="7" fill="currentColor" stroke="none"/></svg></span><span class="brand-name">AppHost</span>
       </button>
-      <label class="search-wrap"><AppIcon name="search"/><input ref="searchInput" v-model="search" type="search" placeholder="搜索" aria-label="搜索应用" @focus="view = 'home'" @keydown.enter="searchEnter"><kbd>⌘K</kbd></label>
+      <div class="search-anchor"><label class="search-wrap"><AppIcon name="search"/><input ref="searchInput" v-model="search" type="search" role="combobox" placeholder="搜索" aria-label="搜索应用" aria-autocomplete="list" aria-controls="search-palette" :aria-expanded="searchOpen" :aria-activedescendant="searchOpen && searchOptions.length ? 'search-option-'+searchActive : undefined" @focus="searchFocus" @blur="searchOpen=false" @input="searchOpen=true" @keydown="searchKeys"><kbd>⌘K</kbd></label><SearchPalette v-if="searchOpen" :items="searchOptions" :active="searchActive" @pick="searchPick" @hover="searchActive=$event" @insert="insertSearch"/></div>
       <div class="bar-status" role="toolbar" aria-label="按状态突出显示">
         <button v-for="(count, key) in counts" :key="key" class="lens" :title="{running:'运行中', failed:'失败', review:'待处理'}[key]" :aria-label="`${{running:'运行中', failed:'失败', review:'待处理'}[key]} ${count}`" :aria-pressed="lens === key" @click="lens = lens === key ? null : key"><i class="chip-dot" :class="{running:'run', failed:'fail', review:'review'}[key]"/><b>{{ count }}</b></button>
       </div>
@@ -204,9 +269,8 @@ onUnmounted(() => { runtime.dispose(); clearInterval(clockTimer); window.removeE
     <div class="workspace">
       <main :aria-busy="loading">
         <ManagementPanel v-if="managementOpened" v-show="view === 'manage'" v-model:section="managementSection" v-model:installation-id="environmentApp" :apps="displayed?.apps || []" :theme="theme" :saving="savingTheme" :preferences="preferences" @preference="editPreference" @theme="saveTheme" @home="view = 'home'" @changed="invalidate(); runtime.resumeWatch(); loginPrompt?.refresh()" @review="view = 'home'; details($event, 'manifest')"/>
-        <section v-if="view === 'home' && search && results.showActions" class="search-actions" aria-label="操作搜索结果"><div v-for="app in filtered.slice(0,12)" :key="app.installation_id"><button v-for="action in results.actions" :key="action" :disabled="runtimeBlocked(displayed) && ['start','stop','restart'].includes(action)" @click="searchExecute(action,app.installation_id)">{{ {start:'启动',stop:'停止',restart:'重启',logs:'日志',details:'详情',failure:'失败现场',manifest:'声明',primary:'打开'}[action] }} {{ app.label }}</button></div></section>
         <TileBoard v-if="view === 'home' && filtered.length && displayed && !(results.onlyActions && results.showActions)" :apps="filtered" :filtering="!!search.trim()" :snapshot="displayed" :lens="lens" :preferences="preferences" :feedback="runtime.feedback.value" @dismiss="runtime.dismiss" @feedback-action="feedbackAction" @preference="editPreference" @batch="batch" @action="searchExecute" @manage="manage('groups')" @details="details" @primary="primary"/>
-        <div v-else-if="view === 'home' && !loading && !filtered.length" class="empty"><h2>{{ error ? '暂时无法读取应用' : displayed?.apps.length ? '没有匹配的应用' : '还没有应用' }}</h2><p>{{ error ? '检查后台或目录后重试。' : displayed?.apps.length ? '试试其他名称。' : '选择项目目录，确认后加入磁贴。' }}</p><button v-if="search" @click="search = ''">清除搜索</button><button v-else-if="!error" class="primary" @click="add">＋ 添加应用</button><button v-else @click="refresh">重新读取</button></div>
+        <div v-else-if="view === 'home' && !loading && !filtered.length && !results.onlyActions" class="empty"><h2>{{ error ? '暂时无法读取应用' : displayed?.apps.length ? '没有匹配的应用' : '还没有应用' }}</h2><p>{{ error ? '检查后台或目录后重试。' : displayed?.apps.length ? '试试其他名称。' : '选择项目目录，确认后加入磁贴。' }}</p><button v-if="search" @click="search = ''">清除搜索</button><button v-else-if="!error" class="primary" @click="add">＋ 添加应用</button><button v-else @click="refresh">重新读取</button></div>
       </main>
       <AppDetails v-if="selected && displayed" v-show="view === 'home'" :key="selected.installation_id" v-model:tab="detailTab" :app="selected" :snapshot="displayed" :busy="runtime.busy.value.has(selected.installation_id)" @action="runtime.action($event, selected.installation_id)" @close="closeDetails" @changed="runtime.message.value = ''; invalidate(); if (!displayed?.live) runtime.resumeWatch()" @dirty="editorDirty = $event" @environment="manage('environment', selected.installation_id)" @relink="manage('applications', selected.installation_id)" @owner="runtime.action('stop-owner-and-start', selected.installation_id, $event)" />
       <ImportPanel v-if="importing" @close="importing = false" @busy="importBusy = $event" @changed="invalidate"/>

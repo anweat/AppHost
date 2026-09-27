@@ -5,6 +5,9 @@ const { invoke }=vi.hoisted(()=>({invoke:vi.fn()}));
 vi.mock('@tauri-apps/api/core',()=>({invoke,isTauri:()=>true,Channel:class {onmessage?:unknown}}));
 import App from './App.vue';
 import TileBoard from './components/TileBoard.vue';
+import SearchPalette from './components/SearchPalette.vue';
+import ManagementPanel from './components/ManagementPanel.vue';
+import AppDetails from './components/AppDetails.vue';
 import { defaults } from './preferences';
 const snapshot={apps:['a','b'].map(id=>({installation_id:id,project_id:id,label:id==='a'?'Notes':'Server',path:'/app/'+id,registration_state:'REGISTERED',requires_confirmation:false,runtime:null})),live:true,read_at_ms:1,runtime_error:null};
 beforeEach(()=>invoke.mockReset().mockImplementation(async(cmd:string)=>{
@@ -82,10 +85,49 @@ describe('desktop compound interactions',()=>{
   });
   it('shows only operation results for > and restores the board when cleared',async()=>{
     const panel=shallowMount(App);await flushPromises();
-    const field=panel.find('input[type=search]');await field.setValue('> notes');
+    const field=panel.find('input[type=search]');await field.trigger('focus');await field.setValue('> notes');
     expect(panel.findComponent(TileBoard).exists()).toBe(false);
-    expect(panel.find('[aria-label="操作搜索结果"]').text()).toContain('启动 Notes');
+    expect(panel.findComponent(SearchPalette).props('items').map((i:any)=>i.label)).toContain('启动 Notes');
     expect(panel.find('.empty').exists()).toBe(false);
     await field.setValue('');expect(panel.findComponent(TileBoard).exists()).toBe(true);panel.unmount();
   });
+  it('offers visible syntax and global commands on focus and executes the selected command',async()=>{
+    const panel=shallowMount(App,{global:{stubs:{SearchPalette:false}}});await flushPromises();
+    const field=panel.find('input[type=search]');await field.trigger('focus');
+    expect(field.attributes('aria-expanded')).toBe('true');
+    expect(panel.find('.palette-syntax').text()).toContain('is: 状态');
+    expect(panel.find('.palette-syntax').text()).toContain('in: 分组');
+    await field.setValue('> 操作记录');expect(panel.find('.empty').exists()).toBe(false);await field.trigger('keydown',{key:'Enter'});await flushPromises();
+    expect(panel.findComponent(ManagementPanel).props('section')).toBe('journal');
+    expect(panel.findComponent(SearchPalette).exists()).toBe(false);
+    expect(invoke.mock.calls.some(c=>c[0]==='desktop_action')).toBe(false);panel.unmount();
+  });
+  it('uses arrow selection and Shift+Enter for the selected application, not the first canvas tile',async()=>{
+    const panel=shallowMount(App,{attachTo:document.body});await flushPromises();const field=panel.find('input[type=search]');
+    (field.element as HTMLInputElement).focus();await flushPromises();await field.trigger('keydown',{key:'ArrowDown'});
+    expect(field.attributes('aria-activedescendant')).toBe('search-option-1');
+    await field.trigger('keydown',{key:'Enter',shiftKey:true});await flushPromises();
+    expect(panel.findComponent(AppDetails).props('app').installation_id).toBe('b');
+    panel.findComponent(AppDetails).vm.$emit('close');await flushPromises();expect(document.activeElement).toBe(field.element);
+    expect(invoke.mock.calls.some(c=>c[0]==='desktop_action')).toBe(false);panel.unmount();
+  });
+  it('keeps explicit operation search available when implicit suggestions are disabled',async()=>{
+    invoke.mockImplementation(async cmd=>{if(cmd==='desktop_snapshot')return snapshot;if(cmd==='desktop_preferences')return {...defaults(),search:{...defaults().search,show_actions:false}};if(cmd==='desktop_watch')return new Promise(()=>{});});
+    const panel=shallowMount(App);await flushPromises();const field=panel.find('input[type=search]');await field.trigger('focus');await field.setValue('> 日志 notes');
+    expect(panel.findComponent(SearchPalette).props('items').map((i:any)=>i.label)).toEqual(['日志 Notes']);
+    await field.trigger('keydown',{key:'Enter'});await flushPromises();expect(panel.findComponent(AppDetails).props('tab')).toBe('logs');panel.unmount();
+  });
+
+  it('preserves filled state filters when adding a group filter from the syntax chip',async()=>{
+    const panel=shallowMount(App,{global:{stubs:{SearchPalette:false}}});await flushPromises();const field=panel.find('input[type=search]');await field.trigger('focus');await field.setValue('is:running');
+    await panel.findAll('.palette-syntax button')[1]!.trigger('click');
+    expect((field.element as HTMLInputElement).value).toBe('is:running in:');panel.unmount();
+  });
+  it('offers the exact global stop alias without treating all as an application name',async()=>{
+    invoke.mockImplementation(async cmd=>{if(cmd==='desktop_snapshot')return {...snapshot,apps:snapshot.apps.map(a=>({...a,runtime:{status:{state:'RUNNING'},services:[{alive:true}]}}))};if(cmd==='desktop_preferences')return defaults();if(cmd==='desktop_watch')return new Promise(()=>{});});
+    const panel=shallowMount(App);await flushPromises();const field=panel.find('input[type=search]');await field.trigger('focus');await field.setValue('> stop all');
+    expect(panel.findComponent(SearchPalette).props('items').map((i:any)=>i.label)).toEqual(['全部停止']);
+    await field.setValue('> 新建分组');expect(panel.findComponent(SearchPalette).props('items').map((i:any)=>i.label)).toEqual(['新建与管理分组']);panel.unmount();
+  });
+
 });

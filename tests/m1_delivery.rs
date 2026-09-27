@@ -18,6 +18,26 @@ fn cli(data: &Path, args: &[&str]) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 #[test]
+fn shipped_manifest_examples_are_valid_single_and_multi_service_declarations() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::create_dir(temp.path().join("web")).unwrap();
+    let guide = apphost::agent::guide();
+    let examples: Vec<apphost::Manifest> = guide["manifest"]
+        .as_str()
+        .unwrap()
+        .split("```toml\n")
+        .skip(1)
+        .map(|block| toml::from_str(block.split("```").next().unwrap()).unwrap())
+        .collect();
+    assert_eq!(examples.len(), 2);
+    for manifest in &examples {
+        assert!(manifest.validate(temp.path()).is_empty());
+    }
+    assert_eq!(examples[0].services.len(), 1);
+    assert_eq!(examples[1].services.len(), 2);
+    assert_eq!(examples[1].open.as_ref().unwrap().service, "web");
+}
+#[test]
 fn embedded_guide_safe_inventory_and_retention_work_without_daemon() {
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path().join("data");
