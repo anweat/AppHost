@@ -16,12 +16,18 @@ pub struct DraftBuffer(Arc<Mutex<Option<ScanResult>>>);
 pub struct ScanResult {
     token: Uuid,
     draft: Draft,
+    editable: Vec<bool>,
 }
 impl DraftBuffer {
     fn replace(&self, draft: Draft) -> Result<ScanResult> {
         bounded(&draft)?;
         let result = ScanResult {
             token: Uuid::new_v4(),
+            editable: draft
+                .candidates
+                .iter()
+                .map(apphost::review::can_edit_candidate)
+                .collect(),
             draft,
         };
         *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(result.clone());
@@ -44,6 +50,45 @@ impl DraftBuffer {
         bounded(&draft)?;
         let result = ScanResult {
             token: Uuid::new_v4(),
+            editable: draft
+                .candidates
+                .iter()
+                .map(apphost::review::can_edit_candidate)
+                .collect(),
+            draft,
+        };
+        *buffer = Some(result.clone());
+        Ok(result)
+    }
+    fn read_candidate(&self, token: Uuid, index: usize) -> Result<String> {
+        let buffer = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let current = buffer
+            .as_ref()
+            .filter(|s| s.token == token)
+            .ok_or_else(stale)?;
+        let candidate = current
+            .draft
+            .candidates
+            .get(index)
+            .ok_or_else(|| Error::new("INVALID_INPUT", "Unknown candidate"))?;
+        apphost::review::candidate_template(candidate)
+    }
+    fn review_candidate(&self, token: Uuid, index: usize, text: &str) -> Result<ScanResult> {
+        let mut buffer = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let current = buffer
+            .as_ref()
+            .filter(|s| s.token == token)
+            .ok_or_else(stale)?;
+        let mut draft = current.draft.clone();
+        apphost::review::edit_candidate(&mut draft, index, text)?;
+        bounded(&draft)?;
+        let result = ScanResult {
+            token: Uuid::new_v4(),
+            editable: draft
+                .candidates
+                .iter()
+                .map(apphost::review::can_edit_candidate)
+                .collect(),
             draft,
         };
         *buffer = Some(result.clone());
@@ -127,6 +172,29 @@ pub async fn desktop_group(
 ) -> Result<ScanResult> {
     let buffer = buffer.inner().clone();
     tauri::async_runtime::spawn_blocking(move || buffer.group(token, index, merge))
+        .await
+        .map_err(join_error)?
+}
+#[tauri::command]
+pub async fn desktop_candidate_read(
+    buffer: tauri::State<'_, DraftBuffer>,
+    token: Uuid,
+    index: usize,
+) -> Result<String> {
+    let buffer = buffer.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || buffer.read_candidate(token, index))
+        .await
+        .map_err(join_error)?
+}
+#[tauri::command]
+pub async fn desktop_candidate_review(
+    buffer: tauri::State<'_, DraftBuffer>,
+    token: Uuid,
+    index: usize,
+    text: String,
+) -> Result<ScanResult> {
+    let buffer = buffer.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || buffer.review_candidate(token, index, &text))
         .await
         .map_err(join_error)?
 }
@@ -343,6 +411,38 @@ mod tests {
             std::fs::read_to_string(root.join("apphost.toml")).unwrap(),
             text
         );
+    }
+    #[test]
+    fn reviewed_candidate_rotates_token_and_only_final_import_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("python");
+        let data = temp.path().join("data");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("requirements.txt"), "fastapi\nuvicorn\n").unwrap();
+        let buffer = DraftBuffer::default();
+        let first = buffer.replace(apphost::scan(&root, 0).unwrap()).unwrap();
+        assert!(first.editable[0]);
+        let template = buffer.read_candidate(first.token, 0).unwrap();
+        assert_eq!(
+            buffer
+                .review_candidate(first.token, 0, &template)
+                .err()
+                .unwrap()
+                .code,
+            "VALIDATION_ERROR"
+        );
+        let text = template.replace(
+            "command = []",
+            "command = [\"uv\", \"run\", \"uvicorn\", \"main:app\"]",
+        );
+        let reviewed = buffer.review_candidate(first.token, 0, &text).unwrap();
+        assert!(!root.join("apphost.toml").exists());
+        assert!(buffer.read_candidate(first.token, 0).is_err());
+        assert!(buffer.take(first.token, &[0]).is_err());
+        assert!(reviewed.draft.candidates[0].issues.is_empty());
+        import(&data, buffer.take(reviewed.token, &[0]).unwrap()).unwrap();
+        assert!(root.join("apphost.toml").exists());
+        assert!(!data.join("runtime").exists());
     }
     #[test]
     fn native_draft_tokens_bind_selection_and_are_single_use() {

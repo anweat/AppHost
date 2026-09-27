@@ -577,3 +577,106 @@ fn nested_grouping_preserves_existing_boundaries_and_read_depth_budgets() {
     .unwrap();
     assert!(scan(other.path(), 1).unwrap().groups.is_empty());
 }
+
+fn python_without_script(root: &Path) -> Draft {
+    fs::create_dir_all(root.join("web")).unwrap();
+    fs::write(
+        root.join("pyproject.toml"),
+        "[project]\nname='paper-reader'\n",
+    )
+    .unwrap();
+    scan(root, 0).unwrap()
+}
+fn explicit_fullstack(draft: &Draft) -> String {
+    let mut manifest = draft.candidates[0].manifest.clone().unwrap();
+    manifest.schema_version = 1;
+    manifest.services = serde_json::from_value(json!([
+        {"name":"api","command":["uv","run","uvicorn","backend.main:app","--port","8000"],"cwd":".","port":8000},
+        {"name":"web","command":["node","node_modules/vite/bin/vite.js","--port","5173"],"cwd":"web","port":5173}
+    ])).unwrap();
+    manifest.open = Some(apphost::manifest::Open {
+        service: "web".into(),
+        path: "/".into(),
+    });
+    manifest.to_toml().unwrap()
+}
+#[test]
+fn desktop_python_review_completes_an_unknown_launch_without_cli_or_execution() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("project");
+    let data = temp.path().join("data");
+    let mut draft = python_without_script(&root);
+    assert!(
+        draft.candidates[0]
+            .issues
+            .iter()
+            .any(|i| i.field == "rules.python")
+    );
+    let template = review::candidate_template(&draft.candidates[0]).unwrap();
+    assert!(template.contains("command = []"));
+    let text = explicit_fullstack(&draft);
+    review::edit_candidate(&mut draft, 0, &text).unwrap();
+    assert!(draft.candidates[0].issues.is_empty());
+    assert!(!draft.candidates[0].selected);
+    assert!(!root.join("apphost.toml").exists());
+    assert!(!data.exists());
+    draft.candidates[0].selected = true;
+    let receipt = import(&data, &draft).unwrap();
+    assert_eq!(receipt.len(), 1);
+    let manifest = Manifest::read(&root.join("apphost.toml")).unwrap();
+    assert_eq!(manifest.services.len(), 2);
+    assert_eq!(manifest.open_target().unwrap().unwrap().port, 5173);
+    assert!(!data.join("runtime").exists());
+}
+#[test]
+fn desktop_review_rejects_invalid_input_and_preserves_identity_and_evidence() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("project");
+    let mut draft = python_without_script(&root);
+    let before = serde_json::to_value(&draft).unwrap();
+    assert!(review::edit_candidate(&mut draft, 0, "bad toml").is_err());
+    let text = explicit_fullstack(&draft);
+    let changed_id = text.replace(
+        &draft.candidates[0]
+            .manifest
+            .as_ref()
+            .unwrap()
+            .project_id
+            .to_string(),
+        &Uuid::new_v4().to_string(),
+    );
+    assert!(review::edit_candidate(&mut draft, 0, &changed_id).is_err());
+    assert!(
+        review::edit_candidate(
+            &mut draft,
+            0,
+            &text.replace("cwd = \"web\"", "cwd = \"../\"")
+        )
+        .is_err()
+    );
+    assert_eq!(serde_json::to_value(&draft).unwrap(), before);
+    review::edit_candidate(&mut draft, 0, &text).unwrap();
+    draft.candidates[0].selected = true;
+    fs::write(root.join("pyproject.toml"), "[project]\nname='changed'\n").unwrap();
+    assert_eq!(
+        import(&temp.path().join("data"), &draft).unwrap_err().code,
+        "STALE_DRAFT"
+    );
+    assert!(!root.join("apphost.toml").exists());
+}
+#[test]
+fn desktop_review_cannot_replace_a_manifest_that_appeared_after_scan() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("project");
+    let mut draft = python_without_script(&root);
+    let text = explicit_fullstack(&draft);
+    fs::write(root.join("apphost.toml"), &text).unwrap();
+    assert!(!review::can_edit_candidate(&draft.candidates[0]));
+    assert_eq!(
+        review::edit_candidate(&mut draft, 0, &text)
+            .unwrap_err()
+            .code,
+        "READ_ONLY_MANIFEST"
+    );
+    assert_eq!(fs::read_to_string(root.join("apphost.toml")).unwrap(), text);
+}

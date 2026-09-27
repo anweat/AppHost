@@ -48,6 +48,8 @@ fn main() {
             registration::desktop_scan,
             registration::desktop_group,
             registration::desktop_import,
+            registration::desktop_candidate_read,
+            registration::desktop_candidate_review,
             registration::desktop_manifest_read,
             registration::desktop_manifest_review,
             registration::desktop_manifest_save,

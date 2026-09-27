@@ -96,3 +96,36 @@ describe('late responses and completion', () => {
     await panel.find('textarea').setValue('another edit'); expect(panel.text()).not.toContain('已保存并确认'); panel.unmount();
   });
 });
+
+describe('incomplete desktop imports', () => {
+  it('completes a missing launch declaration without CLI and requires final explicit selection', async () => {
+    const incomplete = draft(); incomplete.candidates[0]!.manifest.services = [];
+    const ready = draft();
+    invoke.mockResolvedValueOnce({token:'scan',draft:incomplete,editable:[true]})
+      .mockResolvedValueOnce('command = []')
+      .mockResolvedValueOnce({token:'reviewed',draft:ready,editable:[true]})
+      .mockResolvedValueOnce({completed:[{}]});
+    const panel = mount(ImportPanel); await flushPromises();
+    expect(panel.find('input').attributes('disabled')).toBeDefined(); expect(panel.text()).not.toContain('CLI review');
+    await button(panel,'补全启动声明').trigger('click'); await flushPromises();
+    await panel.find('textarea').setValue('command = ["uv", "run", "uvicorn", "main:app"]');
+    expect(button(panel,'确认并登记').attributes('disabled')).toBeDefined();
+    await button(panel,'校验并应用').trigger('click'); await flushPromises();
+    expect(invoke).toHaveBeenCalledWith('desktop_candidate_review',{token:'scan',index:0,text:'command = ["uv", "run", "uvicorn", "main:app"]'});
+    expect(invoke.mock.calls.some(c => c[0] === 'desktop_import')).toBe(false);
+    expect(button(panel,'确认并登记').attributes('disabled')).toBeDefined();
+    await panel.find('input').setValue(true); await button(panel,'确认并登记').trigger('click'); await flushPromises();
+    expect(invoke).toHaveBeenLastCalledWith('desktop_import',{token:'reviewed',selected:[0]}); panel.unmount();
+  });
+  it('retains invalid input and prevents closing or importing until edits are applied or discarded', async () => {
+    const incomplete = draft(); incomplete.candidates[0]!.manifest.services = [];
+    invoke.mockResolvedValueOnce({token:'scan',draft:incomplete,editable:[true]}).mockResolvedValueOnce('command = []')
+      .mockRejectedValueOnce({code:'VALIDATION_ERROR',message:'请修正',details:[{field:'services[0].command',message:'命令不能为空'}]});
+    const panel = mount(ImportPanel); await flushPromises(); await button(panel,'补全启动声明').trigger('click'); await flushPromises();
+    await panel.find('textarea').setValue('bad edit'); await button(panel,'校验并应用').trigger('click'); await flushPromises();
+    expect(panel.find('textarea').element.value).toBe('bad edit'); expect(panel.text()).toContain('命令不能为空');
+    expect(panel.find('[aria-label="关闭添加应用"]').attributes('disabled')).toBeDefined();
+    await panel.trigger('keydown',{key:'Escape'}); expect(panel.emitted('close')).toBeUndefined();
+    await button(panel,'放弃编辑').trigger('click'); expect(panel.find('textarea').exists()).toBe(false); panel.unmount();
+  });
+});

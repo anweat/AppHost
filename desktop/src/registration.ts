@@ -17,4 +17,4 @@ export interface ManifestReview extends Omit<ManifestRead, 'text'> {
 }
 export interface SaveReceipt { confirmed?: boolean; operation_id?: string; operation_done?: boolean; error?: {code: string; message: string} }
 
-export interface ScanResult { token: string; draft: Draft }
+export interface ScanResult { token: string; draft: Draft; editable: boolean[] }

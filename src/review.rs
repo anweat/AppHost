@@ -1,6 +1,6 @@
 use crate::{
     Error, Result,
-    discovery::{Draft, accept_group},
+    discovery::{Candidate, Draft, accept_group},
     manifest::Service,
 };
 use std::{
@@ -32,6 +32,81 @@ fn line(input: &mut impl BufRead, output: &mut impl Write, prompt: &str) -> Resu
 /// User-controlled review only mutates an in-memory draft. All project writes stay in import.
 pub fn review(draft: &mut Draft, input: &mut impl BufRead, output: &mut impl Write) -> Result<()> {
     review_with_descriptions(draft, input, output, false)
+}
+
+/// Desktop review edits only inferred drafts. Existing project/external sources
+/// keep their identity and are never overwritten by the registration workflow.
+pub fn can_edit_candidate(candidate: &Candidate) -> bool {
+    candidate.manifest.is_some() && !has_project_manifest(candidate)
+}
+
+pub fn candidate_template(candidate: &Candidate) -> Result<String> {
+    if !can_edit_candidate(candidate) {
+        return Err(Error::new("READ_ONLY_MANIFEST", "已有清单不能通过导入覆盖"));
+    }
+    let mut manifest = candidate.manifest.clone().unwrap();
+    manifest.schema_version = 1;
+    if manifest.services.is_empty() {
+        manifest.services.push(Service {
+            name: "app".into(),
+            command: vec![],
+            cwd: ".".into(),
+            port: None,
+            env: BTreeMap::new(),
+            startup_timeout_ms: None,
+            stop_timeout_ms: None,
+        });
+    }
+    manifest.to_toml()
+}
+
+pub fn edit_candidate(draft: &mut Draft, index: usize, text: &str) -> Result<()> {
+    if text.len() > 1024 * 1024 {
+        return Err(Error::new("INVALID_INPUT", "启动声明不能超过 1 MiB"));
+    }
+    if !draft.groups.is_empty() {
+        return Err(Error::new("INVALID_INPUT", "请先确定应用分组"));
+    }
+    let candidate = draft
+        .candidates
+        .get(index)
+        .ok_or_else(|| Error::new("INVALID_INPUT", "Unknown candidate"))?;
+    if !can_edit_candidate(candidate) {
+        return Err(Error::new("READ_ONLY_MANIFEST", "已有清单不能通过导入覆盖"));
+    }
+    let manifest: crate::Manifest =
+        toml::from_str(text).map_err(|e| Error::new("VALIDATION_ERROR", e.to_string()))?;
+    let previous = candidate.manifest.as_ref().unwrap();
+    if manifest.project_id != previous.project_id {
+        return Err(Error::new("INVALID_INPUT", "请保留自动生成的 project_id"));
+    }
+    let issues = manifest.validate(&candidate.path);
+    if !issues.is_empty() {
+        return Err(
+            Error::new("VALIDATION_ERROR", "请修正启动声明").details(serde_json::json!(issues))
+        );
+    }
+    let previous_issues = previous.validate(&candidate.path);
+    let mut edited = candidate.clone();
+    // Resolve only inference/old validation diagnostics; preserve unreadable
+    // input and source-boundary evidence. Import still checks every fingerprint.
+    edited.issues.retain(|issue| {
+        issue.field != "rules"
+            && !issue.field.starts_with("rules.")
+            && !previous_issues
+                .iter()
+                .any(|old| old.field == issue.field && old.message == issue.message)
+    });
+    edited.notes.retain(|note| note.field != "launch");
+    let version = manifest.schema_version;
+    edited.manifest = Some(manifest);
+    edited.selected = false;
+    edited.reviewed_launch_sha256 = None;
+    let mut remaining = crate::discovery::MAX_READ_BYTES;
+    edited.refresh_launch_notes_budgeted(&mut remaining)?;
+    draft.schema_version = draft.schema_version.max(version);
+    draft.candidates[index] = edited;
+    Ok(())
 }
 
 pub fn review_with_descriptions(
